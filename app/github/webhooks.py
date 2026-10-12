@@ -7,7 +7,7 @@ import difflib
 import hashlib
 import hmac
 import time  # #5
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import HTTPException, Request
@@ -477,7 +477,7 @@ class WebhookRouter:
             res = await db.execute(stmt)
             acc = res.scalar_one_or_none()
             if acc:
-                acc.suspended_at = datetime.now(timezone.utc)
+                acc.suspended_at = datetime.now(UTC)
                 await db.commit()
                 log.info("Installation %s suspended/deleted", inst_id)
 
