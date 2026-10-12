@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import OrderedDict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -57,7 +57,7 @@ def _parse_ts(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value)
     except (ValueError, AttributeError):
         return None
 
@@ -66,8 +66,8 @@ def _months_since(start: datetime | None) -> int:
     if start is None:
         return 0
     if start.tzinfo is None:
-        start = start.replace(tzinfo=timezone.utc)
-    days = (datetime.now(timezone.utc) - start).days
+        start = start.replace(tzinfo=UTC)
+    days = (datetime.now(UTC) - start).days
     return max(0, days // DAYS_PER_MONTH)
 
 
