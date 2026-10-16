@@ -68,7 +68,7 @@ cp .env.example .env
 ### Windows
 
 ```powershell
-copy .env.example .env
+Copy-Item .env.example .env
 ```
 
 Open `.env` and configure the required values:
