@@ -182,44 +182,52 @@ async def stripe_webhook(
 
     account = await _get_account(db, data_obj)
 
-    if account:
-        if event_type == "checkout.session.completed":
-            # Checkout session completed means the customer entered payment
-            # details, but the subscription may still be incomplete on Stripe's
-            # side.  Do not grant premium here — wait for the subscription event
-            # with status=active or status=trialing to establish eligibility.
-            log.info(
-                "checkout.session.completed for Account ID %d (%s) — "
-                "awaiting subscription activation before granting premium",
-                account.id,
-                account.org_login,
-            )
+    if not account:
+        log.warning(
+            "Stripe webhook %s (%s) could not be matched to any account — "
+            "no org_login or installation_id in event metadata. "
+            "Event has been claimed and will not be retried by Stripe. "
+            "Resolve manually via the Stripe dashboard if this is a legitimate subscription.",
+            event_type,
+            event_id,
+        )
+    elif event_type == "checkout.session.completed":
+        # Checkout session completed means the customer entered payment
+        # details, but the subscription may still be incomplete on Stripe's
+        # side.  Do not grant premium here — wait for the subscription event
+        # with status=active or status=trialing to establish eligibility.
+        log.info(
+            "checkout.session.completed for Account ID %d (%s) — "
+            "awaiting subscription activation before granting premium",
+            account.id,
+            account.org_login,
+        )
 
-        elif event_type in (
-            "customer.subscription.created",
-            "customer.subscription.updated",
-        ):
-            sub_status = data_obj.get("status")
-            new_tier = _tier_for_subscription_status(sub_status)
-            old_tier = account.plan_tier
-            account.plan_tier = new_tier
-            log.info(
-                "Account ID %d (%s): subscription %s (status=%s) → plan_tier %s→%s",
-                account.id,
-                account.org_login,
-                event_type.split(".")[-1],
-                sub_status,
-                old_tier,
-                new_tier,
-            )
+    elif event_type in (
+        "customer.subscription.created",
+        "customer.subscription.updated",
+    ):
+        sub_status = data_obj.get("status")
+        new_tier = _tier_for_subscription_status(sub_status)
+        old_tier = account.plan_tier
+        account.plan_tier = new_tier
+        log.info(
+            "Account ID %d (%s): subscription %s (status=%s) → plan_tier %s→%s",
+            account.id,
+            account.org_login,
+            event_type.split(".")[-1],
+            sub_status,
+            old_tier,
+            new_tier,
+        )
 
-        elif event_type == "customer.subscription.deleted":
-            account.plan_tier = "free"
-            log.info(
-                "Downgraded Account ID %d (%s) to free tier (subscription deleted)",
-                account.id,
-                account.org_login,
-            )
+    elif event_type == "customer.subscription.deleted":
+        account.plan_tier = "free"
+        log.info(
+            "Downgraded Account ID %d (%s) to free tier (subscription deleted)",
+            account.id,
+            account.org_login,
+        )
 
     await db.commit()
 

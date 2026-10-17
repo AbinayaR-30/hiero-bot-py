@@ -308,3 +308,24 @@ async def test_invalid_json_payload_returns_400(db, monkeypatch):
     with pytest.raises(HTTPException) as exc:
         await stripe_webhook(request, db)
     assert exc.value.status_code == 400
+
+
+async def test_unmatched_event_logs_warning(db, monkeypatch, caplog):
+    """A subscription event with no matching account must log a warning, not silently succeed."""
+    import logging
+
+    monkeypatch.setattr(settings, "stripe_webhook_secret", SECRET)
+    body = stripe_event(
+        "customer.subscription.created",
+        event_id="evt_unmatched_999",
+        status="active",
+        # No metadata — no org_login, no installation_id — so no account will match
+    )
+    sig = sign(SECRET, body, int(time.time()))
+    request = make_request(body, sig)
+
+    with caplog.at_level(logging.WARNING, logger="hiero.billing.stripe"):
+        resp = await stripe_webhook(request, db=db)
+
+    assert resp == {"status": "success"}
+    assert any("could not be matched" in r.message for r in caplog.records)
