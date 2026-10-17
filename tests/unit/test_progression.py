@@ -1,6 +1,6 @@
 # tests/unit/test_progression.py
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -213,7 +213,7 @@ def test_check_eligibility_maintainer():
 
 def iso_days_ago(days):
     return (
-        datetime.now(timezone.utc) - timedelta(days=days)
+        datetime.now(UTC) - timedelta(days=days)
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -462,11 +462,11 @@ def test_parse_ts_rejects_junk(value):
 
 
 def test_months_since_counts_whole_months():
-    assert _months_since(datetime.now(timezone.utc) - timedelta(days=95)) == 3
+    assert _months_since(datetime.now(UTC) - timedelta(days=95)) == 3
 
 
 def test_months_since_never_negative():
-    assert _months_since(datetime.now(timezone.utc) + timedelta(days=5)) == 0
+    assert _months_since(datetime.now(UTC) + timedelta(days=5)) == 0
 
 
 def test_months_since_of_none_is_zero():
@@ -474,7 +474,7 @@ def test_months_since_of_none_is_zero():
 
 
 def test_months_since_assumes_utc_for_naive_datetimes():
-    naive = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=60)
+    naive = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=60)
     assert _months_since(naive) == 2
 
 
