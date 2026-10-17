@@ -49,7 +49,8 @@ def stripe_event(
 
 
 @pytest.mark.asyncio
-async def test_checkout_completed_upgrades_account(db, monkeypatch):
+async def test_checkout_completed_does_not_grant_premium(db, monkeypatch):
+    """Checkout completion alone must not grant premium — subscription event required."""
     monkeypatch.setattr(settings, "stripe_webhook_secret", SECRET)
     acc = Account(github_installation_id=601, org_login="acme-direct", plan_tier="free")
     db.add(acc)
@@ -62,7 +63,51 @@ async def test_checkout_completed_upgrades_account(db, monkeypatch):
 
     assert result == {"status": "success"}
     await db.refresh(acc)
+    # Account must remain free until a subscription.created/updated with
+    # status=active or status=trialing is received.
+    assert acc.plan_tier == "free"
+
+
+@pytest.mark.asyncio
+async def test_subscription_created_active_upgrades_account(db, monkeypatch):
+    monkeypatch.setattr(settings, "stripe_webhook_secret", SECRET)
+    acc = Account(github_installation_id=610, org_login="sub-active-org", plan_tier="free")
+    db.add(acc)
+    await db.commit()
+
+    body = stripe_event(
+        "customer.subscription.created",
+        metadata={"org_login": "sub-active-org"},
+        status="active",
+    )
+    request = make_request(body, sign(SECRET, body, int(time.time())))
+
+    result = await stripe_webhook(request, db)
+
+    assert result == {"status": "success"}
+    await db.refresh(acc)
     assert acc.plan_tier == "premium"
+
+
+@pytest.mark.asyncio
+async def test_subscription_updated_past_due_downgrades_account(db, monkeypatch):
+    monkeypatch.setattr(settings, "stripe_webhook_secret", SECRET)
+    acc = Account(github_installation_id=611, org_login="sub-pastdue-org", plan_tier="premium")
+    db.add(acc)
+    await db.commit()
+
+    body = stripe_event(
+        "customer.subscription.updated",
+        metadata={"org_login": "sub-pastdue-org"},
+        status="past_due",
+    )
+    request = make_request(body, sign(SECRET, body, int(time.time())))
+
+    result = await stripe_webhook(request, db)
+
+    assert result == {"status": "success"}
+    await db.refresh(acc)
+    assert acc.plan_tier == "free"
 
 
 @pytest.mark.asyncio
@@ -77,9 +122,10 @@ async def test_duplicate_event_id_is_ignored(db, monkeypatch):
     await db.commit()
 
     body = stripe_event(
-        "checkout.session.completed",
+        "customer.subscription.created",
         event_id="evt_duplicate_test",
         metadata={"org_login": "duplicate-org"},
+        status="active",
     )
     signature = sign(SECRET, body, int(time.time()))
 
@@ -117,9 +163,10 @@ async def test_distinct_event_ids_are_processed_independently(db, monkeypatch):
     await db.commit()
 
     first_body = stripe_event(
-        "checkout.session.completed",
+        "customer.subscription.created",
         event_id="evt_distinct_1",
         metadata={"org_login": "distinct-events-org"},
+        status="active",
     )
     first_signature = sign(SECRET, first_body, int(time.time()))
 
@@ -183,7 +230,8 @@ async def test_checkout_completed_matches_by_installation_id(db, monkeypatch):
 
     assert result == {"status": "success"}
     await db.refresh(acc)
-    assert acc.plan_tier == "premium"
+    # Checkout completion alone must not grant premium.
+    assert acc.plan_tier == "free"
 
 
 @pytest.mark.asyncio

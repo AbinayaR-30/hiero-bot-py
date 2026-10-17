@@ -1,19 +1,27 @@
-# tests/unit/test_premium_gating.py — Verify is_premium helper
+# tests/unit/test_premium_gating.py
+"""Verify the is_premium() soft-check helper."""
+
+import types
+
+import pytest
 
 from app.billing.gating import is_premium
-from app.db.models import Account
 
 
-def test_is_premium_returns_true_for_premium():
-    acc = Account(github_installation_id=1, org_login="ProOrg", plan_tier="premium")
-    assert is_premium(acc) is True
+@pytest.mark.parametrize(
+    "plan_tier, expected",
+    [
+        ("premium", True),
+        ("free", False),
+        ("enterprise", False),  # unknown tier should not be treated as premium
+    ],
+)
+def test_is_premium(plan_tier, expected):
+    # Use a plain namespace so we don't trigger SQLAlchemy instrumentation.
+    account = types.SimpleNamespace(plan_tier=plan_tier)
+    assert is_premium(account) is expected
 
 
-def test_is_premium_returns_false_for_free():
-    acc = Account(github_installation_id=2, org_login="FreeOrg", plan_tier="free")
-    assert is_premium(acc) is False
-
-
-def test_is_premium_returns_false_for_unknown_tier():
-    acc = Account(github_installation_id=3, org_login="WeirdOrg", plan_tier="enterprise")
-    assert is_premium(acc) is False
+def test_is_premium_none_returns_false():
+    """is_premium(None) must return False, not raise AttributeError."""
+    assert is_premium(None) is False

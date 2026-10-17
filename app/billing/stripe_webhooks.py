@@ -184,11 +184,13 @@ async def stripe_webhook(
 
     if account:
         if event_type == "checkout.session.completed":
-            # Checkout completed means the customer successfully paid;
-            # treat as premium.
-            account.plan_tier = "premium"
+            # Checkout session completed means the customer entered payment
+            # details, but the subscription may still be incomplete on Stripe's
+            # side.  Do not grant premium here — wait for the subscription event
+            # with status=active or status=trialing to establish eligibility.
             log.info(
-                "Upgraded Account ID %d (%s) to premium tier via checkout",
+                "checkout.session.completed for Account ID %d (%s) — "
+                "awaiting subscription activation before granting premium",
                 account.id,
                 account.org_login,
             )

@@ -236,7 +236,7 @@ class WebhookRouter:
                 "quality gates", wf_pr.handle_pr_opened(ctx, payload, action), ctx
             )
 
-            # Reviewer assignment is a Premium feature.
+            # Reviewer assignment is a Premium feature (AI-powered rota).
             if action in ("opened", "ready_for_review"):
                 if premium:
                     await self._run_step(
@@ -249,15 +249,8 @@ class WebhookRouter:
                         ctx.get("repo"),
                     )
 
-            # PR health scoring (with AI review) is a Premium feature.
-            if premium:
-                await self._run_step("health scoring", wf_health.score_pr(ctx, payload), ctx)
-            else:
-                log.debug(
-                    "Skipping PR health scoring for %s/%s — account is not premium",
-                    ctx.get("owner"),
-                    ctx.get("repo"),
-                )
+            # PR health scoring is available to all accounts (free feature).
+            await self._run_step("health scoring", wf_health.score_pr(ctx, payload), ctx)
 
         elif action == "closed" and pr.get("merged"):
             await wf_prog.handle_merged_pr(ctx, payload)
