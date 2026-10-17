@@ -319,7 +319,7 @@ async def test_unmatched_event_logs_warning(db, monkeypatch, caplog):
         "customer.subscription.created",
         event_id="evt_unmatched_999",
         status="active",
-        # No metadata — no org_login, no installation_id — so no account will match
+        org_login="org-that-does-not-exist",
     )
     sig = sign(SECRET, body, int(time.time()))
     request = make_request(body, sig)

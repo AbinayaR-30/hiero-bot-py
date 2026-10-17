@@ -75,6 +75,7 @@ async def _get_account(
     metadata = data_obj.get("metadata", {})
     org_login = metadata.get("org_login") or data_obj.get("client_reference_id")
     inst_id = metadata.get("installation_id")
+    stripe_customer_id = data_obj.get("customer")
 
     if inst_id:
         try:
@@ -92,7 +93,18 @@ async def _get_account(
     if org_login:
         stmt = select(Account).where(Account.org_login == org_login)
         res = await db.execute(stmt)
-        return res.scalar_one_or_none()
+        account = res.scalar_one_or_none()
+        if account:
+            return account
+
+    if stripe_customer_id:
+        stmt = select(Account).where(
+            Account.stripe_customer_id == stripe_customer_id
+        )
+        res = await db.execute(stmt)
+        account = res.scalar_one_or_none()
+        if account:
+            return account
 
     return None
 
@@ -196,6 +208,17 @@ async def stripe_webhook(
         # details, but the subscription may still be incomplete on Stripe's
         # side.  Do not grant premium here — wait for the subscription event
         # with status=active or status=trialing to establish eligibility.
+        # Store the Stripe customer ID so subsequent subscription events can
+        # be matched even if subscription metadata is missing.
+        stripe_customer_id = data_obj.get("customer")
+        if stripe_customer_id and not account.stripe_customer_id:
+            account.stripe_customer_id = stripe_customer_id
+            log.info(
+                "Stored Stripe customer ID %s on Account ID %d (%s)",
+                stripe_customer_id,
+                account.id,
+                account.org_login,
+            )
         log.info(
             "checkout.session.completed for Account ID %d (%s) — "
             "awaiting subscription activation before granting premium",
