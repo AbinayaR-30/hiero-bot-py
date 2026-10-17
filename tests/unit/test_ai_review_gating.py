@@ -86,3 +86,54 @@ async def test_missing_account_does_not_trigger_ai_review():
     wf._run_ai_review = _fake
     await wf.handle_pr_opened(ctx, PR, action="opened")
     assert not called, "_run_ai_review must not run when account is None"
+
+@pytest.mark.asyncio
+async def test_free_account_does_not_trigger_reviewer_recommendation():
+    """Free accounts must not receive reviewer recommendations."""
+    called = []
+
+    async def _fake(*_a, **_k):
+        called.append(True)
+
+    wf = _make_wf()
+    wf._recommend_reviewers = _fake
+
+    ctx = _make_ctx("free")
+    ctx["config"].workflows.pull_request.reviewer_recommendation = True
+    await wf.handle_pr_opened(ctx, PR, action="opened")
+    assert not called, "_recommend_reviewers must not run for a free account"
+
+
+@pytest.mark.asyncio
+async def test_premium_account_triggers_reviewer_recommendation():
+    """Premium accounts must receive reviewer recommendations when configured."""
+    called = []
+
+    async def _fake(*_a, **_k):
+        called.append(True)
+
+    wf = _make_wf()
+    wf._recommend_reviewers = _fake
+
+    ctx = _make_ctx("premium")
+    ctx["config"].workflows.pull_request.reviewer_recommendation = True
+    await wf.handle_pr_opened(ctx, PR, action="opened")
+    assert called, "_recommend_reviewers was not called for a premium account"
+
+
+@pytest.mark.asyncio
+async def test_missing_account_does_not_trigger_reviewer_recommendation():
+    """Missing account (None) must not receive reviewer recommendations."""
+    called = []
+
+    async def _fake(*_a, **_k):
+        called.append(True)
+
+    wf = _make_wf()
+    wf._recommend_reviewers = _fake
+
+    ctx = _make_ctx("premium")
+    ctx["account"] = None
+    ctx["config"].workflows.pull_request.reviewer_recommendation = True
+    await wf.handle_pr_opened(ctx, PR, action="opened")
+    assert not called, "_recommend_reviewers must not run when account is None"

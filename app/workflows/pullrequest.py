@@ -133,8 +133,8 @@ class PullRequestWorkflow:
                 # provider connections after the review attempt completes.
                 await self._ai.close()
 
-        # Reviewer recommendation
-        if action in ("opened", "reopened") and cfg.reviewer_recommendation:
+        # Reviewer recommendation (Premium only)
+        if action in ("opened", "reopened") and cfg.reviewer_recommendation and is_premium(ctx.get("account")):
             await self._recommend_reviewers(ctx, pr)
 
         await db.commit()
