@@ -728,14 +728,19 @@ async def test_concurrent_subscription_events_last_write_wins_live_status(db, mo
     # Event B's live status (canceled) must win — account must be downgraded.
     assert acc.plan_tier == "free"
 
-    # Event must NOT have been claimed — Stripe must be able to retry.
+    # Both events must have been claimed exactly once.
     from sqlalchemy import select as sa_select
 
     from app.db.models import StripeEvent
-    claimed = await db.scalar(
-        sa_select(StripeEvent.id).where(StripeEvent.id == "evt_prod_no_key")
+    claimed_a = await db.scalar(
+        sa_select(StripeEvent.id).where(StripeEvent.id == "evt_concurrent_a")
     )
-    assert claimed is None
+    assert claimed_a == "evt_concurrent_a"
+
+    claimed_b = await db.scalar(
+        sa_select(StripeEvent.id).where(StripeEvent.id == "evt_concurrent_b")
+    )
+    assert claimed_b == "evt_concurrent_b"
 
 
 @pytest.mark.asyncio
