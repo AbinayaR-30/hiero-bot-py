@@ -316,9 +316,18 @@ async def stripe_webhook(
         # revisit this handler to avoid erroneously revoking Premium when a
         # secondary subscription is deleted while a primary one remains active.
         # Acquire a row-level lock on the account before fetching live status.
-        # This serializes concurrent subscription events for the same account,
-        # preventing a slower concurrent request from overwriting the result of
-        # a faster one that already applied a newer tier.
+        # This serializes concurrent subscription events for the same account:
+        # a second concurrent request will block at this line until the first
+        # request commits (releasing the lock), then re-read the committed tier
+        # before applying its own live-status result.
+        #
+        # Lock guarantee: PostgreSQL (production) — SELECT ... FOR UPDATE holds
+        # the row lock for the duration of the transaction, which covers the
+        # live Stripe lookup and the subsequent tier update.  SQLite (tests)
+        # ignores FOR UPDATE; sequential correctness is verified by the unit
+        # tests but true concurrent serialization requires a multi-connection
+        # integration test against the production engine, which is out of scope
+        # for this unit suite and tracked as a follow-up task.
         await db.refresh(account, with_for_update=True)
 
         subscription_id = data_obj.get("id")
