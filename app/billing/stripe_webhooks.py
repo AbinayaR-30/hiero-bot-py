@@ -20,6 +20,23 @@ from app.utils.settings import settings
 log = get_logger("billing.stripe")
 router = APIRouter(prefix="/webhooks", tags=["billing"])
 
+# Stripe subscription statuses that grant premium access.
+# Only fully active or trialing subscriptions should unlock premium features.
+_ACTIVE_STATUSES = frozenset({"active", "trialing"})
+
+
+def _tier_for_subscription_status(status: str | None) -> str:
+    """Map a Stripe subscription status to an internal plan tier.
+
+    Only ``active`` and ``trialing`` subscriptions grant premium access.
+    Every other status (``incomplete``, ``incomplete_expired``,
+    ``past_due``, ``unpaid``, ``canceled``, ``paused``, or unknown)
+    maps to the free tier.
+    """
+    if status in _ACTIVE_STATUSES:
+        return "premium"
+    return "free"
+
 
 def verify_stripe_signature(payload_bytes: bytes, sig_header: str, secret: str) -> bool:
     if not secret:
@@ -166,22 +183,38 @@ async def stripe_webhook(
     account = await _get_account(db, data_obj)
 
     if account:
-        if event_type in (
-            "checkout.session.completed",
+        if event_type == "checkout.session.completed":
+            # Checkout completed means the customer successfully paid;
+            # treat as premium.
+            account.plan_tier = "premium"
+            log.info(
+                "Upgraded Account ID %d (%s) to premium tier via checkout",
+                account.id,
+                account.org_login,
+            )
+
+        elif event_type in (
             "customer.subscription.created",
             "customer.subscription.updated",
         ):
-            account.plan_tier = "premium"
+            sub_status = data_obj.get("status")
+            new_tier = _tier_for_subscription_status(sub_status)
+            old_tier = account.plan_tier
+            account.plan_tier = new_tier
             log.info(
-                "Upgraded Account ID %d (%s) to premium tier",
+                "Account ID %d (%s): subscription %s (status=%s) → plan_tier %s→%s",
                 account.id,
                 account.org_login,
+                event_type.split(".")[-1],
+                sub_status,
+                old_tier,
+                new_tier,
             )
 
         elif event_type == "customer.subscription.deleted":
             account.plan_tier = "free"
             log.info(
-                "Downgraded Account ID %d (%s) to free tier",
+                "Downgraded Account ID %d (%s) to free tier (subscription deleted)",
                 account.id,
                 account.org_login,
             )

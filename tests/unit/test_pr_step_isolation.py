@@ -1,5 +1,6 @@
 """A failing PR step must not silently skip the steps after it."""
 
+import types
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -13,7 +14,15 @@ PAYLOAD = {
     "action": "opened",
     "pull_request": {"number": 1, "draft": False, "user": {"login": "author"}},
 }
-CTX = {"owner": "o", "repo": "r", "installation_id": 1, "config": None, "db": None}
+# Include a premium account so the gating check allows reviewer and health steps.
+CTX = {
+    "owner": "o",
+    "repo": "r",
+    "installation_id": 1,
+    "config": None,
+    "db": None,
+    "account": types.SimpleNamespace(plan_tier="premium"),
+}
 
 
 def _http_422() -> httpx.HTTPStatusError:
