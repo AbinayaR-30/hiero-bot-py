@@ -24,6 +24,15 @@ router = APIRouter(prefix="/webhooks", tags=["billing"])
 # Only fully active or trialing subscriptions should unlock premium features.
 _ACTIVE_STATUSES = frozenset({"active", "trialing"})
 
+# Subscription events must be matched to an account before being claimed,
+# so that unmatched events return 400 and Stripe retries them rather than
+# permanently acknowledging an event we could not act on.
+_SUBSCRIPTION_EVENTS = frozenset({
+    "customer.subscription.created",
+    "customer.subscription.updated",
+    "customer.subscription.deleted",
+})
+
 
 def _tier_for_subscription_status(status: str | None) -> str:
     """Map a Stripe subscription status to an internal plan tier.
@@ -187,44 +196,65 @@ async def stripe_webhook(
     ):
         return {"status": "success"}
 
+    # For subscription events, resolve the account BEFORE claiming it.
+    # Returning 400 for unmatched events lets Stripe retry (e.g. when the
+    # subscription event races ahead of checkout.session.completed which
+    # stores stripe_customer_id). Reuse the resolved account below.
+    account = None
+    if event_type in _SUBSCRIPTION_EVENTS:
+        account = await _get_account(db, data_obj)
+        if not account:
+            log.warning(
+                "Stripe webhook %s (%s) could not be matched to any account — "
+                "returning 400 so Stripe will retry. "
+                "This is expected if the subscription event arrived before "
+                "checkout.session.completed stored the customer ID.",
+                event_type,
+                event_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Account not found for this subscription event; will retry.",
+            )
+
     claimed = await _claim_event(db, event_id, event_type)
     if not claimed:
         log.info("Ignoring duplicate Stripe webhook event: %s", event_id)
         return {"status": "success"}
 
-    account = await _get_account(db, data_obj)
+    # For checkout events, account not yet resolved; resolve it now.
+    if account is None:
+        account = await _get_account(db, data_obj)
 
-    if not account:
-        log.warning(
-            "Stripe webhook %s (%s) could not be matched to any account — "
-            "no org_login or installation_id in event metadata. "
-            "Event has been claimed and will not be retried by Stripe. "
-            "Resolve manually via the Stripe dashboard if this is a legitimate subscription.",
-            event_type,
-            event_id,
-        )
-    elif event_type == "checkout.session.completed":
+    if event_type == "checkout.session.completed":
         # Checkout session completed means the customer entered payment
         # details, but the subscription may still be incomplete on Stripe's
         # side.  Do not grant premium here — wait for the subscription event
         # with status=active or status=trialing to establish eligibility.
         # Store the Stripe customer ID so subsequent subscription events can
         # be matched even if subscription metadata is missing.
-        stripe_customer_id = data_obj.get("customer")
-        if stripe_customer_id and not account.stripe_customer_id:
-            account.stripe_customer_id = stripe_customer_id
+        if account is None:
+            log.warning(
+                "checkout.session.completed (%s) could not be matched to any account — "
+                "no org_login or installation_id in event metadata. Ignoring.",
+                event_id,
+            )
+        else:
+            stripe_customer_id = data_obj.get("customer")
+            if stripe_customer_id and not account.stripe_customer_id:
+                account.stripe_customer_id = stripe_customer_id
+                log.info(
+                    "Stored Stripe customer ID %s on Account ID %d (%s)",
+                    stripe_customer_id,
+                    account.id,
+                    account.org_login,
+                )
             log.info(
-                "Stored Stripe customer ID %s on Account ID %d (%s)",
-                stripe_customer_id,
+                "checkout.session.completed for Account ID %d (%s) — "
+                "awaiting subscription activation before granting premium",
                 account.id,
                 account.org_login,
             )
-        log.info(
-            "checkout.session.completed for Account ID %d (%s) — "
-            "awaiting subscription activation before granting premium",
-            account.id,
-            account.org_login,
-        )
 
     elif event_type in (
         "customer.subscription.created",

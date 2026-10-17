@@ -310,8 +310,9 @@ async def test_invalid_json_payload_returns_400(db, monkeypatch):
     assert exc.value.status_code == 400
 
 
-async def test_unmatched_event_logs_warning(db, monkeypatch, caplog):
-    """A subscription event with no matching account must log a warning, not silently succeed."""
+@pytest.mark.asyncio
+async def test_unmatched_subscription_event_returns_400(db, monkeypatch, caplog):
+    """An unmatched subscription event must return 400 so Stripe retries it."""
     import logging
 
     monkeypatch.setattr(settings, "stripe_webhook_secret", SECRET)
@@ -324,8 +325,115 @@ async def test_unmatched_event_logs_warning(db, monkeypatch, caplog):
     sig = sign(SECRET, body, int(time.time()))
     request = make_request(body, sig)
 
-    with caplog.at_level(logging.WARNING, logger="hiero.billing.stripe"):
-        resp = await stripe_webhook(request, db=db)
+    with caplog.at_level(logging.WARNING, logger="hiero.billing.stripe"), pytest.raises(HTTPException) as exc:
+        await stripe_webhook(request, db=db)
 
-    assert resp == {"status": "success"}
+    assert exc.value.status_code == 400
     assert any("could not be matched" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_customer_id_fallback_activates_account(db, monkeypatch):
+    """checkout stores stripe_customer_id; later subscription event matches via customer ID."""
+    monkeypatch.setattr(settings, "stripe_webhook_secret", SECRET)
+    acc = Account(github_installation_id=620, org_login="cust-id-org", plan_tier="free")
+    db.add(acc)
+    await db.commit()
+
+    # Step 1: checkout.session.completed — matched by org_login, stores customer ID.
+    checkout_body = stripe_event(
+        "checkout.session.completed",
+        event_id="evt_checkout_cust_id",
+        metadata={"org_login": "cust-id-org"},
+        customer="cus_test_abc123",
+    )
+    await stripe_webhook(
+        make_request(checkout_body, sign(SECRET, checkout_body, int(time.time()))),
+        db=db,
+    )
+    await db.refresh(acc)
+    assert acc.stripe_customer_id == "cus_test_abc123"
+    assert acc.plan_tier == "free"  # not yet activated
+
+    # Step 2: subscription event carries only customer ID (no metadata).
+    sub_body = stripe_event(
+        "customer.subscription.created",
+        event_id="evt_sub_cust_id",
+        customer="cus_test_abc123",
+        status="active",
+    )
+    result = await stripe_webhook(
+        make_request(sub_body, sign(SECRET, sub_body, int(time.time()))),
+        db=db,
+    )
+
+    assert result == {"status": "success"}
+    await db.refresh(acc)
+    assert acc.plan_tier == "premium"
+
+
+@pytest.mark.asyncio
+async def test_subscription_before_checkout_returns_400_and_retries(db, monkeypatch):
+    """If subscription event arrives before checkout stores customer ID, return 400 so Stripe retries."""
+    monkeypatch.setattr(settings, "stripe_webhook_secret", SECRET)
+    acc = Account(
+        github_installation_id=621,
+        org_login="race-org",
+        plan_tier="free",
+        stripe_customer_id=None,
+    )
+    db.add(acc)
+    await db.commit()
+
+    # Subscription event arrives first — carries only customer ID, no metadata.
+    # Account has no stripe_customer_id yet so _get_account returns None.
+    sub_body = stripe_event(
+        "customer.subscription.created",
+        event_id="evt_sub_race",
+        customer="cus_race_xyz",
+        status="active",
+    )
+    with pytest.raises(HTTPException) as exc:
+        await stripe_webhook(
+            make_request(sub_body, sign(SECRET, sub_body, int(time.time()))),
+            db=db,
+        )
+    assert exc.value.status_code == 400
+
+    # Event must NOT have been claimed — Stripe can retry it.
+    from sqlalchemy import select as sa_select
+
+    from app.db.models import StripeEvent
+    claimed = await db.scalar(
+        sa_select(StripeEvent.id).where(StripeEvent.id == "evt_sub_race")
+    )
+    assert claimed is None
+
+    # Now checkout arrives and stores the customer ID.
+    checkout_body = stripe_event(
+        "checkout.session.completed",
+        event_id="evt_checkout_race",
+        metadata={"org_login": "race-org"},
+        customer="cus_race_xyz",
+    )
+    await stripe_webhook(
+        make_request(checkout_body, sign(SECRET, checkout_body, int(time.time()))),
+        db=db,
+    )
+    await db.refresh(acc)
+    assert acc.stripe_customer_id == "cus_race_xyz"
+
+    # Stripe retries the subscription event — now it matches and activates.
+    sub_retry_body = stripe_event(
+        "customer.subscription.created",
+        event_id="evt_sub_race_retry",
+        customer="cus_race_xyz",
+        status="active",
+    )
+    result = await stripe_webhook(
+        make_request(sub_retry_body, sign(SECRET, sub_retry_body, int(time.time()))),
+        db=db,
+    )
+    assert result == {"status": "success"}
+    await db.refresh(acc)
+    assert acc.plan_tier == "premium"
