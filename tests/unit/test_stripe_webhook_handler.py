@@ -444,3 +444,74 @@ async def test_subscription_before_checkout_returns_400_and_retries(db, monkeypa
         sa_select(StripeEvent.id).where(StripeEvent.id == "evt_sub_race")
     )
     assert claimed_after == "evt_sub_race"
+
+
+@pytest.mark.asyncio
+async def test_out_of_order_events_do_not_overwrite_newer_state(db, monkeypatch):
+    """Older events arriving late must not overwrite newer billing state.
+
+    Stripe does not guarantee event delivery order.  This test simulates the
+    pathological case where a stale ``past_due`` event arrives AFTER a newer
+    ``active`` event has already been processed.  The stale event carries an
+    older status in its body, but because we fall back to the event-embedded
+    status in tests (no real Stripe API key), we verify the architectural
+    intent:
+
+    1. The ``active`` event (new) is processed first → account becomes premium.
+    2. The ``past_due`` event (stale, different event ID) arrives afterwards.
+       In production the handler fetches the live subscription status, which
+       is ``active``, so the stale embedded ``past_due`` is never used.
+       In this test, ``_fetch_live_subscription_status`` is patched to return
+       the live status directly, simulating what production would do.
+    3. The account remains premium after the stale event is processed.
+    """
+    from app.billing import stripe_webhooks as billing_module
+
+    monkeypatch.setattr(settings, "stripe_webhook_secret", SECRET)
+    acc = Account(
+        github_installation_id=630,
+        org_login="out-of-order-org",
+        plan_tier="free",
+    )
+    db.add(acc)
+    await db.commit()
+
+    # Step 1: newer event (active) arrives first.
+    active_body = stripe_event(
+        "customer.subscription.updated",
+        event_id="evt_newer_active",
+        metadata={"org_login": "out-of-order-org"},
+        id="sub_ooo_test",
+        status="active",
+    )
+
+    async def _live_active(_sid):
+        return "active"
+
+    monkeypatch.setattr(billing_module, "_fetch_live_subscription_status", _live_active)
+    result = await stripe_webhook(
+        make_request(active_body, sign(SECRET, active_body, int(time.time()))), db=db
+    )
+    assert result == {"status": "success"}
+    await db.refresh(acc)
+    assert acc.plan_tier == "premium"
+
+    # Step 2: older event (past_due) arrives late.
+    # In production, fetching the live subscription still returns "active"
+    # (Stripe's current truth), so the stale embedded status is ignored.
+    stale_body = stripe_event(
+        "customer.subscription.updated",
+        event_id="evt_older_past_due",  # different event ID — not a duplicate
+        metadata={"org_login": "out-of-order-org"},
+        id="sub_ooo_test",
+        status="past_due",  # stale status embedded in the event body
+    )
+    # Patch live-fetch to return the authoritative live status (still active).
+    monkeypatch.setattr(billing_module, "_fetch_live_subscription_status", _live_active)
+    result = await stripe_webhook(
+        make_request(stale_body, sign(SECRET, stale_body, int(time.time()))), db=db
+    )
+    assert result == {"status": "success"}
+    await db.refresh(acc)
+    # Account must remain premium — the live status wins over the stale event body.
+    assert acc.plan_tier == "premium"
