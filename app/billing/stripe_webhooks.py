@@ -315,6 +315,12 @@ async def stripe_webhook(
         # subscriptions per account.  If the subscription model ever changes,
         # revisit this handler to avoid erroneously revoking Premium when a
         # secondary subscription is deleted while a primary one remains active.
+        # Acquire a row-level lock on the account before fetching live status.
+        # This serializes concurrent subscription events for the same account,
+        # preventing a slower concurrent request from overwriting the result of
+        # a faster one that already applied a newer tier.
+        await db.refresh(account, with_for_update=True)
+
         subscription_id = data_obj.get("id")
         live_result = await _fetch_live_subscription_status(subscription_id)
 

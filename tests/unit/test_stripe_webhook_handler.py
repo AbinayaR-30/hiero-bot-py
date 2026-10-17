@@ -655,6 +655,79 @@ async def test_production_without_api_key_returns_500(db, monkeypatch):
     await db.refresh(acc)
     assert acc.plan_tier == "free"
 
+
+@pytest.mark.asyncio
+async def test_concurrent_subscription_events_last_write_wins_live_status(db, monkeypatch):
+    """Concurrent webhook deliveries for the same account must not leave a stale tier.
+
+    Simulates two events processing concurrently: both fetch the live status,
+    but the live status seen by each may differ if a subscription change occurs
+    between their lookups.  The row-level lock on the account ensures that
+    the second writer always sees the committed state of the first before
+    applying its own result — preventing a slower stale write from overwriting
+    a faster correct one.
+
+    This test exercises the sequential case (lock enforces ordering) rather
+    than true concurrency, which requires a multi-connection setup beyond unit
+    tests.  It verifies that the final tier reflects the last live status
+    written under lock, not a racing in-memory update.
+    """
+
+    from app.billing import stripe_webhooks as billing_module
+
+    monkeypatch.setattr(settings, "stripe_webhook_secret", SECRET)
+
+    acc = Account(
+        github_installation_id=650,
+        org_login="concurrent-org",
+        plan_tier="free",
+    )
+    db.add(acc)
+    await db.commit()
+
+    call_count = 0
+
+    async def _live_first_active_then_canceled(_sid):
+        nonlocal call_count
+        call_count += 1
+        # First call (Event A, stale active event): live says active.
+        # Second call (Event B, deletion event): live says canceled.
+        return "active" if call_count == 1 else "canceled"
+
+    monkeypatch.setattr(
+        billing_module, "_fetch_live_subscription_status", _live_first_active_then_canceled
+    )
+
+    # Event A: stale active event — live lookup returns "active".
+    body_a = stripe_event(
+        "customer.subscription.updated",
+        event_id="evt_concurrent_a",
+        metadata={"org_login": "concurrent-org"},
+        id="sub_concurrent",
+        status="active",
+    )
+    result_a = await stripe_webhook(
+        make_request(body_a, sign(SECRET, body_a, int(time.time()))), db=db
+    )
+    assert result_a == {"status": "success"}
+    await db.refresh(acc)
+    assert acc.plan_tier == "premium"
+
+    # Event B: deletion event — live lookup returns "canceled".
+    body_b = stripe_event(
+        "customer.subscription.deleted",
+        event_id="evt_concurrent_b",
+        metadata={"org_login": "concurrent-org"},
+        id="sub_concurrent",
+    )
+    result_b = await stripe_webhook(
+        make_request(body_b, sign(SECRET, body_b, int(time.time()))), db=db
+    )
+    assert result_b == {"status": "success"}
+    await db.refresh(acc)
+    # Event B's live status (canceled) must win — account must be downgraded.
+    assert acc.plan_tier == "free"
+
     # Event must NOT have been claimed — Stripe must be able to retry.
     from sqlalchemy import select as sa_select
 
