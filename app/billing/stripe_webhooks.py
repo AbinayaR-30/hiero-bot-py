@@ -81,6 +81,20 @@ async def _get_account(
     db: AsyncSession,
     data_obj: dict,
 ) -> Account | None:
+    # Account resolution order:
+    # 1. metadata.installation_id  — GitHub installation ID (integer)
+    # 2. metadata.org_login or client_reference_id — GitHub org login
+    # 3. customer  — Stripe customer ID, stored on the Account at checkout
+    #
+    # INTEGRATION INVARIANT: whoever creates the Stripe Checkout Session
+    # must set account-identifying metadata so that the checkout.session.completed
+    # event can be matched here and the Stripe customer ID stored on the Account.
+    # Use subscription_data.metadata (NOT session-level metadata) for identifiers
+    # that must survive through to customer.subscription.* events, because Stripe
+    # does NOT automatically copy session metadata to the resulting Subscription.
+    # Recommended: set client_reference_id=org_login on the Checkout Session, and
+    # also set subscription_data.metadata={"org_login": org_login} so subscription
+    # events carry the identifier directly without relying on the customer-ID fallback.
     metadata = data_obj.get("metadata", {})
     org_login = metadata.get("org_login") or data_obj.get("client_reference_id")
     inst_id = metadata.get("installation_id")

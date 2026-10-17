@@ -423,10 +423,11 @@ async def test_subscription_before_checkout_returns_400_and_retries(db, monkeypa
     await db.refresh(acc)
     assert acc.stripe_customer_id == "cus_race_xyz"
 
-    # Stripe retries the subscription event — now it matches and activates.
+    # Stripe retries delivery of the SAME event ID — verify it was not
+    # claimed on the failed attempt and is processed successfully now.
     sub_retry_body = stripe_event(
         "customer.subscription.created",
-        event_id="evt_sub_race_retry",
+        event_id="evt_sub_race",  # same ID as the failed attempt
         customer="cus_race_xyz",
         status="active",
     )
@@ -437,3 +438,9 @@ async def test_subscription_before_checkout_returns_400_and_retries(db, monkeypa
     assert result == {"status": "success"}
     await db.refresh(acc)
     assert acc.plan_tier == "premium"
+
+    # Confirm the event was claimed exactly once (on the successful retry).
+    claimed_after = await db.scalar(
+        sa_select(StripeEvent.id).where(StripeEvent.id == "evt_sub_race")
+    )
+    assert claimed_after == "evt_sub_race"
