@@ -9,6 +9,7 @@ import httpx
 from sqlalchemy import select
 
 from app.ai.reviewer import AIReviewer
+from app.billing.gating import is_premium
 from app.db.models import ReviewerRecommendation
 from app.github.client import GitHubClient
 from app.utils import audit
@@ -123,8 +124,8 @@ class PullRequestWorkflow:
                 },
             )
 
-        # AI review
-        if action in ("opened", "reopened") and cfg.ai_review.enabled:
+        # AI review (Premium only)
+        if action in ("opened", "reopened") and cfg.ai_review.enabled and is_premium(ctx.get("account")):
             try:
                 await self._run_ai_review(ctx, pr)
             finally:
