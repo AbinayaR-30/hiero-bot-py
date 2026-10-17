@@ -1,7 +1,7 @@
 """add stripe_customer_id to accounts
 
 Revision ID: a1c3f8e92b74
-Revises: 38b5a2a98694
+Revises: c2b6f4d81a3e
 Create Date: 2026-10-17 13:35:00.000000
 
 """
@@ -13,7 +13,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = "a1c3f8e92b74"
-down_revision = "38b5a2a98694"
+down_revision = "c2b6f4d81a3e"
 branch_labels = None
 depends_on = None
 

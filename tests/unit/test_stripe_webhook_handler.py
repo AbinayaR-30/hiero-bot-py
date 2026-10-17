@@ -595,10 +595,11 @@ async def test_stripe_api_failure_on_deletion_returns_400(db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_no_api_key_falls_back_to_event_status(db, monkeypatch):
-    """Without a Stripe API key (dev/test), event-embedded status is used as fallback."""
+async def test_no_api_key_in_dev_falls_back_to_event_status(db, monkeypatch):
+    """In non-production (dev/test), missing Stripe API key falls back to event-embedded status."""
     monkeypatch.setattr(settings, "stripe_webhook_secret", SECRET)
     monkeypatch.setattr(settings, "stripe_secret_key", None)
+    monkeypatch.setattr(settings, "environment", "development")
     acc = Account(
         github_installation_id=642,
         org_login="no-key-org",
@@ -619,8 +620,49 @@ async def test_no_api_key_falls_back_to_event_status(db, monkeypatch):
     )
     assert result == {"status": "success"}
     await db.refresh(acc)
-    # Without a key, event-embedded status is trusted — account upgrades to premium.
+    # In dev/test, event-embedded status is trusted — account upgrades to premium.
     assert acc.plan_tier == "premium"
+
+
+@pytest.mark.asyncio
+async def test_production_without_api_key_returns_500(db, monkeypatch):
+    """In production, a missing Stripe API key must fail closed — never trust event-embedded status."""
+    monkeypatch.setattr(settings, "stripe_webhook_secret", SECRET)
+    monkeypatch.setattr(settings, "stripe_secret_key", None)
+    monkeypatch.setattr(settings, "environment", "production")
+    acc = Account(
+        github_installation_id=644,
+        org_login="prod-no-key-org",
+        plan_tier="free",
+    )
+    db.add(acc)
+    await db.commit()
+
+    body = stripe_event(
+        "customer.subscription.created",
+        event_id="evt_prod_no_key",
+        metadata={"org_login": "prod-no-key-org"},
+        id="sub_prod_no_key",
+        status="active",
+    )
+    with pytest.raises(HTTPException) as exc:
+        await stripe_webhook(
+            make_request(body, sign(SECRET, body, int(time.time()))), db=db
+        )
+    # Must fail closed — 500 tells Stripe to retry; account must not be upgraded.
+    assert exc.value.status_code == 500
+
+    await db.refresh(acc)
+    assert acc.plan_tier == "free"
+
+    # Event must NOT have been claimed — Stripe must be able to retry.
+    from sqlalchemy import select as sa_select
+
+    from app.db.models import StripeEvent
+    claimed = await db.scalar(
+        sa_select(StripeEvent.id).where(StripeEvent.id == "evt_prod_no_key")
+    )
+    assert claimed is None
 
 
 @pytest.mark.asyncio

@@ -283,6 +283,23 @@ async def stripe_webhook(
                 detail="Account not found for this subscription event; will retry.",
             )
 
+        # Fail closed in production if the Stripe API key is absent.
+        # A correctly signed webhook that we cannot verify against live Stripe
+        # data must not silently update billing state from potentially stale
+        # event-embedded status.  In dev/test (non-production) the fallback is
+        # intentional and safe.
+        if settings.is_production and not settings.stripe_secret_key:
+            log.error(
+                "STRIPE_SECRET_KEY is not configured in production — "
+                "cannot verify live subscription status for %s (%s)",
+                event_type,
+                event_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Stripe API key not configured; cannot safely process subscription event.",
+            )
+
         # Fetch the live subscription status from Stripe to guard against
         # out-of-order event delivery.  Stripe explicitly does not guarantee
         # that events arrive in the order they were generated, so the status
