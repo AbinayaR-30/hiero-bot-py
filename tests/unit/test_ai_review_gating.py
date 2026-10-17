@@ -69,3 +69,20 @@ async def test_premium_account_triggers_ai_review():
     wf._run_ai_review = _fake  # instance-level override
     await wf.handle_pr_opened(_make_ctx("premium"), PR, action="opened")
     assert called, "_run_ai_review was not called for a premium account"
+
+
+@pytest.mark.asyncio
+async def test_missing_account_does_not_trigger_ai_review():
+    """When ctx has no account (None), AI review must not run."""
+    called = []
+
+    async def _fake(*_a, **_k):
+        called.append(True)
+
+    ctx = _make_ctx("premium")
+    ctx["account"] = None  # simulate missing account row
+
+    wf = _make_wf()
+    wf._run_ai_review = _fake
+    await wf.handle_pr_opened(ctx, PR, action="opened")
+    assert not called, "_run_ai_review must not run when account is None"
