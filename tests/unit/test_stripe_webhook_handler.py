@@ -448,22 +448,13 @@ async def test_subscription_before_checkout_returns_400_and_retries(db, monkeypa
 
 @pytest.mark.asyncio
 async def test_out_of_order_events_do_not_overwrite_newer_state(db, monkeypatch):
-    """Older events arriving late must not overwrite newer billing state.
+    """Older stale events must not overwrite newer billing state.
 
-    Stripe does not guarantee event delivery order.  This test simulates the
-    pathological case where a stale ``past_due`` event arrives AFTER a newer
-    ``active`` event has already been processed.  The stale event carries an
-    older status in its body, but because we fall back to the event-embedded
-    status in tests (no real Stripe API key), we verify the architectural
-    intent:
-
-    1. The ``active`` event (new) is processed first → account becomes premium.
-    2. The ``past_due`` event (stale, different event ID) arrives afterwards.
-       In production the handler fetches the live subscription status, which
-       is ``active``, so the stale embedded ``past_due`` is never used.
-       In this test, ``_fetch_live_subscription_status`` is patched to return
-       the live status directly, simulating what production would do.
-    3. The account remains premium after the stale event is processed.
+    Stripe does not guarantee event delivery order.  A stale ``past_due``
+    event arriving after a newer ``active`` event has been processed must not
+    downgrade the account.  The handler fetches the live subscription status
+    from Stripe; in this test that is patched to return ``"active"``
+    (the current truth), so the stale embedded ``past_due`` is ignored.
     """
     from app.billing import stripe_webhooks as billing_module
 
@@ -476,6 +467,9 @@ async def test_out_of_order_events_do_not_overwrite_newer_state(db, monkeypatch)
     db.add(acc)
     await db.commit()
 
+    async def _live_active(_sid):
+        return "active"
+
     # Step 1: newer event (active) arrives first.
     active_body = stripe_event(
         "customer.subscription.updated",
@@ -484,10 +478,6 @@ async def test_out_of_order_events_do_not_overwrite_newer_state(db, monkeypatch)
         id="sub_ooo_test",
         status="active",
     )
-
-    async def _live_active(_sid):
-        return "active"
-
     monkeypatch.setattr(billing_module, "_fetch_live_subscription_status", _live_active)
     result = await stripe_webhook(
         make_request(active_body, sign(SECRET, active_body, int(time.time()))), db=db
@@ -496,22 +486,174 @@ async def test_out_of_order_events_do_not_overwrite_newer_state(db, monkeypatch)
     await db.refresh(acc)
     assert acc.plan_tier == "premium"
 
-    # Step 2: older event (past_due) arrives late.
-    # In production, fetching the live subscription still returns "active"
-    # (Stripe's current truth), so the stale embedded status is ignored.
+    # Step 2: older event (past_due) arrives late with a different event ID.
+    # Live lookup still returns "active" — the stale embedded status is ignored.
     stale_body = stripe_event(
         "customer.subscription.updated",
-        event_id="evt_older_past_due",  # different event ID — not a duplicate
+        event_id="evt_older_past_due",
         metadata={"org_login": "out-of-order-org"},
         id="sub_ooo_test",
-        status="past_due",  # stale status embedded in the event body
+        status="past_due",
     )
-    # Patch live-fetch to return the authoritative live status (still active).
     monkeypatch.setattr(billing_module, "_fetch_live_subscription_status", _live_active)
     result = await stripe_webhook(
         make_request(stale_body, sign(SECRET, stale_body, int(time.time()))), db=db
     )
     assert result == {"status": "success"}
     await db.refresh(acc)
-    # Account must remain premium — the live status wins over the stale event body.
     assert acc.plan_tier == "premium"
+
+
+@pytest.mark.asyncio
+async def test_stripe_api_failure_returns_400_and_does_not_update_tier(db, monkeypatch):
+    """If the live Stripe API call fails, return 400 (retryable) — do not apply stale event data.
+
+    A stale ``active`` event body must not restore Premium if the subscription
+    is actually canceled.  When the live lookup fails, the handler returns 400
+    so Stripe retries later, leaving the account tier unchanged.
+    """
+    from app.billing import stripe_webhooks as billing_module
+    from app.billing.stripe_webhooks import _LOOKUP_FAILED
+
+    monkeypatch.setattr(settings, "stripe_webhook_secret", SECRET)
+    acc = Account(
+        github_installation_id=640,
+        org_login="api-fail-org",
+        plan_tier="free",
+    )
+    db.add(acc)
+    await db.commit()
+
+    # Patch live lookup to simulate a Stripe API failure.
+    async def _live_fail(_sid):
+        return _LOOKUP_FAILED
+
+    monkeypatch.setattr(billing_module, "_fetch_live_subscription_status", _live_fail)
+
+    body = stripe_event(
+        "customer.subscription.updated",
+        event_id="evt_api_fail",
+        metadata={"org_login": "api-fail-org"},
+        id="sub_api_fail",
+        status="active",  # stale event body — should NOT be trusted
+    )
+    with pytest.raises(HTTPException) as exc:
+        await stripe_webhook(
+            make_request(body, sign(SECRET, body, int(time.time()))), db=db
+        )
+    assert exc.value.status_code == 400
+
+    # Account tier must be unchanged — we did not apply the stale event data.
+    await db.refresh(acc)
+    assert acc.plan_tier == "free"
+
+    # Event must NOT have been claimed — Stripe must be able to retry it.
+    from sqlalchemy import select as sa_select
+
+    from app.db.models import StripeEvent
+    claimed = await db.scalar(
+        sa_select(StripeEvent.id).where(StripeEvent.id == "evt_api_fail")
+    )
+    assert claimed is None
+
+
+@pytest.mark.asyncio
+async def test_stripe_api_failure_on_deletion_returns_400(db, monkeypatch):
+    """A Stripe API failure during subscription.deleted must return 400, not downgrade the account."""
+    from app.billing import stripe_webhooks as billing_module
+    from app.billing.stripe_webhooks import _LOOKUP_FAILED
+
+    monkeypatch.setattr(settings, "stripe_webhook_secret", SECRET)
+    acc = Account(
+        github_installation_id=641,
+        org_login="del-fail-org",
+        plan_tier="premium",
+    )
+    db.add(acc)
+    await db.commit()
+
+    async def _live_fail(_sid):
+        return _LOOKUP_FAILED
+
+    monkeypatch.setattr(billing_module, "_fetch_live_subscription_status", _live_fail)
+
+    body = stripe_event(
+        "customer.subscription.deleted",
+        event_id="evt_del_fail",
+        metadata={"org_login": "del-fail-org"},
+        id="sub_del_fail",
+    )
+    with pytest.raises(HTTPException) as exc:
+        await stripe_webhook(
+            make_request(body, sign(SECRET, body, int(time.time()))), db=db
+        )
+    assert exc.value.status_code == 400
+
+    # Account must remain premium — live status could not be confirmed.
+    await db.refresh(acc)
+    assert acc.plan_tier == "premium"
+
+
+@pytest.mark.asyncio
+async def test_no_api_key_falls_back_to_event_status(db, monkeypatch):
+    """Without a Stripe API key (dev/test), event-embedded status is used as fallback."""
+    monkeypatch.setattr(settings, "stripe_webhook_secret", SECRET)
+    monkeypatch.setattr(settings, "stripe_secret_key", None)
+    acc = Account(
+        github_installation_id=642,
+        org_login="no-key-org",
+        plan_tier="free",
+    )
+    db.add(acc)
+    await db.commit()
+
+    body = stripe_event(
+        "customer.subscription.created",
+        event_id="evt_no_key",
+        metadata={"org_login": "no-key-org"},
+        id="sub_no_key",
+        status="active",
+    )
+    result = await stripe_webhook(
+        make_request(body, sign(SECRET, body, int(time.time()))), db=db
+    )
+    assert result == {"status": "success"}
+    await db.refresh(acc)
+    # Without a key, event-embedded status is trusted — account upgrades to premium.
+    assert acc.plan_tier == "premium"
+
+
+@pytest.mark.asyncio
+async def test_subscription_deleted_uses_live_status_before_downgrading(db, monkeypatch):
+    """subscription.deleted must verify via live status before downgrading."""
+    from app.billing import stripe_webhooks as billing_module
+
+    monkeypatch.setattr(settings, "stripe_webhook_secret", SECRET)
+    acc = Account(
+        github_installation_id=643,
+        org_login="del-live-org",
+        plan_tier="premium",
+    )
+    db.add(acc)
+    await db.commit()
+
+    # Live status confirms the subscription is actually canceled — downgrade is correct.
+    async def _live_canceled(_sid):
+        return "canceled"
+
+    monkeypatch.setattr(
+        billing_module, "_fetch_live_subscription_status", _live_canceled
+    )
+
+    body = stripe_event(
+        "customer.subscription.deleted",
+        event_id="evt_del_live",
+        metadata={"org_login": "del-live-org"},
+        id="sub_del_live",
+    )
+    result = await stripe_webhook(
+        make_request(body, sign(SECRET, body, int(time.time()))), db=db
+    )
+    assert result == {"status": "success"}
+    await db.refresh(acc)
+    assert acc.plan_tier == "free"

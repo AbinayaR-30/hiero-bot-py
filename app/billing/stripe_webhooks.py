@@ -48,7 +48,18 @@ def _tier_for_subscription_status(sub_status: str | None) -> str:
     return "free"
 
 
-async def _fetch_live_subscription_status(subscription_id: str | None) -> str | None:
+# Sentinel returned by _fetch_live_subscription_status when the Stripe API key
+# is configured but the live lookup fails.  Distinct from None (which means
+# "no key configured — dev/test mode") so callers can make the right choice:
+#   None        → no key; safe to fall back to event-embedded status
+#   _LOOKUP_FAILED → key present but call failed; do NOT fall back to stale
+#                    event data — return 400 so Stripe retries
+_LOOKUP_FAILED = object()
+
+
+async def _fetch_live_subscription_status(
+    subscription_id: str | None,
+) -> str | None | object:
     """Fetch the *current* subscription status directly from Stripe.
 
     Stripe does not guarantee that webhook events arrive in the order they
@@ -56,31 +67,32 @@ async def _fetch_live_subscription_status(subscription_id: str | None) -> str | 
     overwriting a newer (correct) tier with a stale one.  By fetching the
     live subscription we always act on the current source-of-truth.
 
-    Returns the current ``status`` string, or ``None`` when:
-    - no subscription ID is available (e.g. checkout events),
-    - no Stripe secret key is configured (dev/test environments), or
-    - the Stripe API call fails (we fall through to the event's own status).
-
-    The caller must handle a ``None`` return by falling back to the event's
-    embedded status so that tests without a real Stripe key still work.
+    Return values:
+    - ``str``           — the live status fetched from Stripe (use this).
+    - ``None``          — no API key configured (dev/test); caller may fall
+                          back to the event-embedded status safely.
+    - ``_LOOKUP_FAILED``— key is configured but the API call failed; the
+                          caller must NOT fall back to the event-embedded
+                          status because it may be stale.  Return 400 so
+                          Stripe retries the event later.
     """
     if not subscription_id:
         return None
     if not settings.stripe_secret_key:
-        # Not configured — dev/test environment; caller falls back to event status.
+        # Dev/test environment — no key configured; caller falls back to event status.
         return None
     try:
         stripe_sdk.api_key = settings.stripe_secret_key
         sub = await stripe_sdk.Subscription.retrieve_async(subscription_id)
         return sub.status  # type: ignore[attr-defined]
-    except stripe_sdk.StripeError as exc:
+    except Exception as exc:
         log.warning(
             "Could not fetch live subscription status for %s from Stripe: %s — "
-            "falling back to event-embedded status.",
+            "returning 400 so Stripe retries rather than applying stale event data.",
             subscription_id,
             exc,
         )
-        return None
+        return _LOOKUP_FAILED
 
 
 def verify_stripe_signature(payload_bytes: bytes, sig_header: str, secret: str) -> bool:
@@ -246,11 +258,15 @@ async def stripe_webhook(
     ):
         return {"status": "success"}
 
-    # For subscription events, resolve the account BEFORE claiming it.
-    # Returning 400 for unmatched events lets Stripe retry (e.g. when the
-    # subscription event races ahead of checkout.session.completed which
-    # stores stripe_customer_id). Reuse the resolved account below.
+    # For subscription events, resolve both the account and the live subscription
+    # status BEFORE claiming the event.  Returning 400 before claiming ensures
+    # Stripe will retry any event we cannot safely act on:
+    #   • No account match  → 400 (checkout hasn't stored the customer ID yet)
+    #   • Live lookup failed → 400 (stale event data must not update tier)
+    # Both checks must precede _claim_event so the event remains retryable.
     account = None
+    live_result = None  # set for subscription events below; None = not applicable
+    subscription_id: str | None = None
     if event_type in _SUBSCRIPTION_EVENTS:
         account = await _get_account(db, data_obj)
         if not account:
@@ -265,6 +281,34 @@ async def stripe_webhook(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Account not found for this subscription event; will retry.",
+            )
+
+        # Fetch the live subscription status from Stripe to guard against
+        # out-of-order event delivery.  Stripe explicitly does not guarantee
+        # that events arrive in the order they were generated, so the status
+        # embedded in this event body may be stale.
+        #
+        # _fetch_live_subscription_status returns:
+        #   str            → live status; use it.
+        #   None           → no API key (dev/test); fall back to event-embedded status.
+        #   _LOOKUP_FAILED → key configured but call failed; return 400 so Stripe
+        #                    retries rather than applying potentially stale data.
+        #
+        # NOTE: this product does not support multiple concurrent Stripe
+        # subscriptions per account.  If the subscription model ever changes,
+        # revisit this handler to avoid erroneously revoking Premium when a
+        # secondary subscription is deleted while a primary one remains active.
+        subscription_id = data_obj.get("id")
+        live_result = await _fetch_live_subscription_status(subscription_id)
+
+        if live_result is _LOOKUP_FAILED:
+            # API key is configured but the live lookup failed.  Do not apply
+            # the event's embedded (potentially stale) status.  Return 400 so
+            # Stripe retries after its backoff.  The event is not claimed, so
+            # the retry will be processed as a fresh delivery.
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Stripe API unavailable; could not verify subscription status. Will retry.",
             )
 
     claimed = await _claim_event(db, event_id, event_type)
@@ -306,52 +350,61 @@ async def stripe_webhook(
                 account.org_login,
             )
 
-    elif event_type in (
-        "customer.subscription.created",
-        "customer.subscription.updated",
-    ):
-        # Fetch the live subscription status from Stripe to guard against
-        # out-of-order event delivery.  Stripe explicitly does not guarantee
-        # that events arrive in the order they were generated, so the status
-        # embedded in this event body may be stale.  The live status is the
-        # authoritative source; we fall back to the event's own status only
-        # when the Stripe API is unavailable (e.g. dev/test environments
-        # without a real API key).
-        #
-        # NOTE: this product does not support multiple concurrent Stripe
-        # subscriptions per account.  If the subscription model ever changes,
-        # revisit this handler to avoid erroneously revoking Premium when a
-        # secondary subscription is deleted while a primary one remains active.
-        subscription_id = data_obj.get("id")
-        live_status = await _fetch_live_subscription_status(subscription_id)
-        sub_status = live_status if live_status is not None else data_obj.get("status")
-        if live_status is None and subscription_id:
-            log.debug(
-                "No live status from Stripe for subscription %s — using event-embedded status %r",
-                subscription_id,
-                sub_status,
-            )
-        new_tier = _tier_for_subscription_status(sub_status)
-        old_tier = account.plan_tier
-        account.plan_tier = new_tier
-        log.info(
-            "Account ID %d (%s): subscription %s (status=%s, source=%s) → plan_tier %s→%s",
-            account.id,
-            account.org_login,
-            event_type.split(".")[-1],
-            sub_status,
-            "live" if live_status is not None else "event",
-            old_tier,
-            new_tier,
-        )
+    elif event_type in _SUBSCRIPTION_EVENTS:
+        # live_result was resolved before claiming (above).
+        # live_result is None here only when no API key is configured (dev/test).
+        # _LOOKUP_FAILED was already handled above and never reaches this point.
 
-    elif event_type == "customer.subscription.deleted":
-        account.plan_tier = "free"
-        log.info(
-            "Downgraded Account ID %d (%s) to free tier (subscription deleted)",
-            account.id,
-            account.org_login,
-        )
+        if live_result is None:
+            # No API key — dev/test environment.  Fall back to event-embedded status.
+            sub_status = data_obj.get("status")
+            status_source = "event"
+            log.debug(
+                "No Stripe API key configured; using event-embedded status %r for subscription %s",
+                sub_status,
+                subscription_id,
+            )
+        else:
+            sub_status = live_result
+            status_source = "live"
+
+        if event_type == "customer.subscription.deleted":
+            # For deletion, trust the live status: if the subscription is truly
+            # gone or canceled, downgrade.  If the live status is somehow active
+            # (e.g. the deletion event is a phantom or the sub was recreated),
+            # do not downgrade — let the live status decide.
+            if sub_status not in _ACTIVE_STATUSES:
+                account.plan_tier = "free"
+                log.info(
+                    "Downgraded Account ID %d (%s) to free tier "
+                    "(subscription deleted, live_status=%s, source=%s)",
+                    account.id,
+                    account.org_login,
+                    sub_status,
+                    status_source,
+                )
+            else:
+                log.info(
+                    "Ignoring subscription.deleted for Account ID %d (%s): "
+                    "live status is %r — not downgrading.",
+                    account.id,
+                    account.org_login,
+                    sub_status,
+                )
+        else:
+            new_tier = _tier_for_subscription_status(sub_status)
+            old_tier = account.plan_tier
+            account.plan_tier = new_tier
+            log.info(
+                "Account ID %d (%s): subscription %s (status=%s, source=%s) → plan_tier %s→%s",
+                account.id,
+                account.org_login,
+                event_type.split(".")[-1],
+                sub_status,
+                status_source,
+                old_tier,
+                new_tier,
+            )
 
     await db.commit()
 
