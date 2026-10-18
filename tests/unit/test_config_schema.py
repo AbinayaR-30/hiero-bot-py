@@ -445,8 +445,6 @@ def test_every_schema_field_has_a_runtime_reader():
 
         tree = ast.parse(path.read_text(encoding="utf-8"))
 
-        # Keep aliases local to their function so an unrelated variable named
-        # "cfg" elsewhere cannot satisfy a schema field.
         scopes = [
             node
             for node in ast.walk(tree)
@@ -456,9 +454,6 @@ def test_every_schema_field_has_a_runtime_reader():
         for scope in scopes:
             aliases = {}
 
-            # Resolve simple aliases such as:
-            # cfg = ctx["config"].workflows.issue_management
-            # Iterate until no new configuration-derived aliases are found.
             for _ in range(len(scope.body) + 1):
                 changed = False
 
@@ -484,9 +479,6 @@ def test_every_schema_field_has_a_runtime_reader():
                         if not isinstance(target, ast.Name):
                             continue
 
-                        # Don't replace an existing config alias with a
-                        # different path just because AST traversal visits
-                        # assignments in a different order.
                         existing = aliases.get(target.id)
 
                         if existing is None:
@@ -533,54 +525,207 @@ def test_every_schema_field_has_a_runtime_reader():
 
     schema_paths = collect_field_paths(RepoConfig)
 
-    # These fields are consumed indirectly through helper parameters or
-    # represent the config's identity rather than a workflow setting.
-    # These fields have verified readers that the AST detector cannot trace
-    # through helper parameters or individual items in configuration lists.
-    indirect_readers = {
-        # Repo identity metadata is validated by the loader.
-        "repo",
-
-        # _scan_issue receives cfg: IssueManagementConfig as a helper
-        # parameter, so these reads aren't rooted directly at ctx["config"].
-        "workflows.issue_management.exempt_labels",
-        "workflows.issue_management.stale_label",
-
-        # LabelEscalationRule instances are read through individual rule objects.
-        "workflows.issue_management.label_escalation_rules.label",
-        "workflows.issue_management.label_escalation_rules.notify_team",
-
-        # These configuration values are consumed by onboarding helper methods.
-        "workflows.onboarding.cla_document_url",
-        "workflows.onboarding.onboarding_checklist",
-        "workflows.onboarding.welcome_message",
-
-        # Role requirements are passed into progression helper methods.
-        "workflows.progression.requirements_for_junior_committer",
-        "workflows.progression.requirements_for_committer",
-        "workflows.progression.requirements_for_maintainer",
-        "workflows.progression.requirements_for_junior_committer.min_merged_prs",
-        "workflows.progression.requirements_for_junior_committer.min_reviews_given",
-        "workflows.progression.requirements_for_junior_committer.min_months_active",
-        "workflows.progression.requirements_for_committer.min_merged_prs",
-        "workflows.progression.requirements_for_committer.min_reviews_given",
-        "workflows.progression.requirements_for_committer.min_months_active",
-        "workflows.progression.requirements_for_maintainer.min_merged_prs",
-        "workflows.progression.requirements_for_maintainer.min_reviews_given",
-        "workflows.progression.requirements_for_maintainer.min_months_active",
-
-        # AI-review settings are consumed by the reviewer implementation.
-        # The AST detector currently cannot trace the config object through
-        # reviewer initialization into app/ai/reviewer.py.
-        "workflows.pull_request.ai_review.focus_areas",
-        "workflows.pull_request.ai_review.max_retries",
-        "workflows.pull_request.ai_review.model",
-        "workflows.pull_request.ai_review.provider",
-        "workflows.pull_request.ai_review.timeout_seconds",
+    indirect_reader_contracts = {
+        "workflows.issue_management.exempt_labels": [
+            ("app/workflows/issuemanagement.py", "IssueManagementWorkflow", "_scan_issue", "cfg.exempt_labels"),
+        ],
+        "workflows.issue_management.stale_label": [
+            ("app/workflows/issuemanagement.py", "IssueManagementWorkflow", "_scan_issue", "cfg.stale_label"),
+        ],
+        "workflows.issue_management.label_escalation_rules.label": [
+            ("app/workflows/issuemanagement.py", "IssueManagementWorkflow", "handle_label_escalation", "r.label"),
+        ],
+        "workflows.issue_management.label_escalation_rules.notify_team": [
+            ("app/workflows/issuemanagement.py", "IssueManagementWorkflow", "handle_label_escalation", "rule.notify_team"),
+        ],
+        "workflows.onboarding.cla_document_url": [
+            ("app/workflows/onboarding.py", "OnboardingWorkflow", "_cla_notice", "cfg.cla_document_url"),
+        ],
+        "workflows.onboarding.onboarding_checklist": [
+            ("app/workflows/onboarding.py", "OnboardingWorkflow", "_build_welcome", "cfg.onboarding_checklist"),
+        ],
+        "workflows.onboarding.welcome_message": [
+            ("app/workflows/onboarding.py", "OnboardingWorkflow", "_build_welcome", "cfg.welcome_message"),
+        ],
+        "workflows.progression.requirements_for_junior_committer": [
+            ("app/workflows/progression.py", "ProgressionWorkflow", "_check_eligibility", "cfg.requirements_for_junior_committer"),
+            ("app/workflows/progression.py", "ProgressionWorkflow", "_build_full_report", "cfg.requirements_for_junior_committer"),
+        ],
+        "workflows.progression.requirements_for_committer": [
+            ("app/workflows/progression.py", "ProgressionWorkflow", "_check_eligibility", "cfg.requirements_for_committer"),
+            ("app/workflows/progression.py", "ProgressionWorkflow", "_build_full_report", "cfg.requirements_for_committer"),
+        ],
+        "workflows.progression.requirements_for_maintainer": [
+            ("app/workflows/progression.py", "ProgressionWorkflow", "_check_eligibility", "cfg.requirements_for_maintainer"),
+            ("app/workflows/progression.py", "ProgressionWorkflow", "_build_full_report", "cfg.requirements_for_maintainer"),
+        ],
+        "workflows.progression.requirements_for_junior_committer.min_merged_prs": [
+            ("app/workflows/progression.py", "ProgressionWorkflow", "_check_eligibility", "reqs.min_merged_prs"),
+            ("app/workflows/progression.py", "ProgressionWorkflow", "_build_full_report", "reqs.min_merged_prs"),
+        ],
+        "workflows.progression.requirements_for_junior_committer.min_reviews_given": [
+            ("app/workflows/progression.py", "ProgressionWorkflow", "_check_eligibility", "reqs.min_reviews_given"),
+            ("app/workflows/progression.py", "ProgressionWorkflow", "_build_full_report", "reqs.min_reviews_given"),
+        ],
+        "workflows.progression.requirements_for_junior_committer.min_months_active": [
+            ("app/workflows/progression.py", "ProgressionWorkflow", "_check_eligibility", "reqs.min_months_active"),
+            ("app/workflows/progression.py", "ProgressionWorkflow", "_build_full_report", "reqs.min_months_active"),
+        ],
+        "workflows.progression.requirements_for_committer.min_merged_prs": [
+            ("app/workflows/progression.py", "ProgressionWorkflow", "_check_eligibility", "reqs.min_merged_prs"),
+            ("app/workflows/progression.py", "ProgressionWorkflow", "_build_full_report", "reqs.min_merged_prs"),
+        ],
+        "workflows.progression.requirements_for_committer.min_reviews_given": [
+            ("app/workflows/progression.py", "ProgressionWorkflow", "_check_eligibility", "reqs.min_reviews_given"),
+            ("app/workflows/progression.py", "ProgressionWorkflow", "_build_full_report", "reqs.min_reviews_given"),
+        ],
+        "workflows.progression.requirements_for_committer.min_months_active": [
+            ("app/workflows/progression.py", "ProgressionWorkflow", "_check_eligibility", "reqs.min_months_active"),
+            ("app/workflows/progression.py", "ProgressionWorkflow", "_build_full_report", "reqs.min_months_active"),
+        ],
+        "workflows.progression.requirements_for_maintainer.min_merged_prs": [
+            ("app/workflows/progression.py", "ProgressionWorkflow", "_check_eligibility", "reqs.min_merged_prs"),
+            ("app/workflows/progression.py", "ProgressionWorkflow", "_build_full_report", "reqs.min_merged_prs"),
+        ],
+        "workflows.progression.requirements_for_maintainer.min_reviews_given": [
+            ("app/workflows/progression.py", "ProgressionWorkflow", "_check_eligibility", "reqs.min_reviews_given"),
+            ("app/workflows/progression.py", "ProgressionWorkflow", "_build_full_report", "reqs.min_reviews_given"),
+        ],
+        "workflows.progression.requirements_for_maintainer.min_months_active": [
+            ("app/workflows/progression.py", "ProgressionWorkflow", "_check_eligibility", "reqs.min_months_active"),
+            ("app/workflows/progression.py", "ProgressionWorkflow", "_build_full_report", "reqs.min_months_active"),
+        ],
+        "workflows.pull_request.ai_review.focus_areas": [
+            ("app/ai/reviewer.py", "AIReviewer", "_build_prompt", "cfg.focus_areas"),
+        ],
+        "workflows.pull_request.ai_review.max_retries": [
+            ("app/ai/reviewer.py", "AIReviewer", "_complete_with_retries", 'getattr(cfg, "max_retries", 2)'),
+        ],
+        "workflows.pull_request.ai_review.model": [
+            ("app/ai/reviewer.py", "AIReviewer", "review", "cfg.model"),
+        ],
+        "workflows.pull_request.ai_review.provider": [
+            ("app/ai/reviewer.py", "AIReviewer", "_get_backend", 'getattr(cfg, "provider", "auto")'),
+        ],
+        "workflows.pull_request.ai_review.timeout_seconds": [
+            ("app/ai/reviewer.py", "AIReviewer", "review", 'getattr(cfg, "timeout_seconds", 60)'),
+        ],
     }
 
-    # Parent configuration objects count as read when their nested fields
-    # are accessed, but unrelated same-named attributes do not count.
+    schema_only_fields = {"repo"}
+    source_trees = {}
+
+    def find_method(tree, class_name, method_name):
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef) or node.name != class_name:
+                continue
+
+            for child in node.body:
+                if (
+                    isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and child.name == method_name
+                ):
+                    return child
+
+        return None
+
+    def has_expression(function, expression):
+        expected = ast.dump(ast.parse(expression, mode="eval").body)
+
+        return any(
+            ast.dump(node) == expected
+            for node in ast.walk(function)
+        )
+
+    def has_role_requirements(function, role, method_name):
+        requirements_attribute = f"requirements_for_{role.replace('-', '_')}"
+
+        for node in ast.walk(function):
+            if method_name == "_check_eligibility":
+                if not isinstance(node, ast.Tuple):
+                    continue
+
+                elements = node.elts
+                if (
+                    len(elements) == 2
+                    and isinstance(elements[0], ast.Constant)
+                    and elements[0].value == role
+                    and ast.dump(elements[1])
+                    == ast.dump(
+                        ast.parse(
+                            f"cfg.{requirements_attribute}",
+                            mode="eval",
+                        ).body
+                    )
+                ):
+                    return True
+
+            elif method_name == "_build_full_report":
+                if not isinstance(node, ast.Call):
+                    continue
+
+                if not isinstance(node.func, ast.Name) or node.func.id != "row":
+                    continue
+
+                if len(node.args) < 2:
+                    continue
+
+                if (
+                    isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value == role
+                    and ast.dump(node.args[1])
+                    == ast.dump(
+                        ast.parse(
+                            f"cfg.{requirements_attribute}",
+                            mode="eval",
+                        ).body
+                    )
+                ):
+                    return True
+
+        return False
+
+    for field_path, contracts in indirect_reader_contracts.items():
+        for source_file, class_name, method_name, expression in contracts:
+            if source_file not in source_trees:
+                source_path = root / source_file
+                source_trees[source_file] = ast.parse(
+                    source_path.read_text(encoding="utf-8")
+                )
+
+            function = find_method(
+                source_trees[source_file],
+                class_name,
+                method_name,
+            )
+
+            assert function is not None, (
+                f"Reader method {class_name}.{method_name} for "
+                f"{field_path!r} was not found in {source_file!r}"
+            )
+            assert has_expression(function, expression), (
+                f"Expected {expression!r} in "
+                f"{class_name}.{method_name} for {field_path!r}"
+            )
+
+
+    progression_tree = source_trees.get("app/workflows/progression.py")
+    assert progression_tree is not None
+
+    for role in ("junior-committer", "committer", "maintainer"):
+        for method_name in ("_check_eligibility", "_build_full_report"):
+            function = find_method(
+                progression_tree,
+                "ProgressionWorkflow",
+                method_name,
+            )
+
+            assert function is not None
+            assert has_role_requirements(function, role, method_name), (
+                f"{method_name} does not associate {role!r} with "
+                f"cfg.requirements_for_{role.replace('-', '_')}"
+            )
+
     for path in tuple(runtime_paths):
         parts = path.split(".")
         runtime_paths.update(
@@ -588,7 +733,12 @@ def test_every_schema_field_has_a_runtime_reader():
             for index in range(1, len(parts))
         )
 
-    unused = sorted(schema_paths - runtime_paths - indirect_readers)
+    unused = sorted(
+        schema_paths
+        - runtime_paths
+        - set(indirect_reader_contracts)
+        - schema_only_fields
+    )
 
     assert unused == [], (
         "Schema fields without detected configuration readers: "
