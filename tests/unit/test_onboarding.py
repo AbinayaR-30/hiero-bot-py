@@ -740,17 +740,31 @@ async def test_unimplemented_strategies_do_not_pile_onto_first_member(
 
 
 @pytest.mark.asyncio
-async def test_mentor_assignment_records_chosen_mentor(mock_gh, ctx):
+@pytest.mark.parametrize(
+    "strategy",
+    ["round-robin", "least-busy", "expertise-match"],
+)
+async def test_mentor_assignment_records_effective_strategy(
+    mock_gh, ctx, strategy
+):
     from sqlalchemy import select
 
     from app.db.models import AuditLog
 
+    ctx["config"].workflows.onboarding.mentor_assignment_strategy = strategy
     mock_gh.list_team_members = AsyncMock(return_value=MENTORS)
 
     await assign_mentors(mock_gh, ctx, ["alice"])
 
-    entry = (await ctx["db"].execute(select(AuditLog))).scalars().one()
-    assert entry.action == "contributor.mentor_assigned"
+    entry = (
+        await ctx["db"].execute(
+            select(AuditLog).where(
+                AuditLog.action == "contributor.mentor_assigned"
+            )
+        )
+    ).scalars().one()
+
+    assert entry.reason == "Mentor @mentor-a assigned via least-assigned"
     assert entry.metadata_json == {"mentor": "mentor-a"}
 
 

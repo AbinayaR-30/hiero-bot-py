@@ -487,11 +487,13 @@ class OnboardingWorkflow:
             return
 
         strategy = ctx["config"].workflows.onboarding.mentor_assignment_strategy
+        effective_strategy = "least-assigned"
+
         if strategy != "round-robin":
-            # Not implemented yet. Balancing is a better fallback than sending
-            # every contributor to the first team member.
             log.info(
-                "Mentor strategy %r is not implemented; using round-robin", strategy
+                "Mentor strategy %r is not implemented; using %s",
+                strategy,
+                effective_strategy,
             )
 
         async with _mentor_assign_locks.get(
@@ -521,7 +523,7 @@ class OnboardingWorkflow:
                 repo=ctx["repo"],
                 target_number=issue_number,
                 target_login=contributor,
-                reason=f"Mentor @{mentor} assigned via {strategy}",
+                reason=f"Mentor @{mentor} assigned via {effective_strategy}",
                 metadata={"mentor": mentor},
             )
             await db.commit()
