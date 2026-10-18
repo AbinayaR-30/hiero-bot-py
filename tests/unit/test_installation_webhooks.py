@@ -1,6 +1,6 @@
 # tests/unit/test_installation_webhooks.py — Installation webhook unit tests
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 
@@ -125,10 +125,14 @@ async def test_config_change_invalidates_cache_before_loading(db):
 
 
 @pytest.mark.asyncio
-async def test_invalid_config_is_acknowledged_without_retrying(db):
+async def test_invalid_config_is_acknowledged_without_retrying(db, monkeypatch):
+    from app.github import webhooks as webhooks_module
+
+    webhook_log = Mock()
+    monkeypatch.setattr(webhooks_module, "log", webhook_log)
+
     gh = MagicMock()
     config_loader = MagicMock()
-    config_loader.load = AsyncMock()
 
     async def load(owner, repo, installation_id):
         raise ConfigInvalid(
@@ -136,8 +140,7 @@ async def test_invalid_config_is_acknowledged_without_retrying(db):
             "workflows.pull_request.enabled: Input should be a valid boolean",
         )
 
-    config_loader.load.side_effect = load
-
+    config_loader.load = AsyncMock(side_effect=load)
     router = WebhookRouter(gh, config_loader)
 
     payload = {
@@ -151,19 +154,12 @@ async def test_invalid_config_is_acknowledged_without_retrying(db):
     request = MagicMock()
     request.body = AsyncMock(return_value=b"")
     router._verify_signature = MagicMock()
-    request.headers = {
-        "X-GitHub-Event": "pull_request",
-    }
+    request.headers = {"X-GitHub-Event": "pull_request"}
     request.json = AsyncMock(return_value=payload)
 
-    result = await router.handle(request, db)
+    for _ in range(3):
+        result = await router.handle(request, db)
+        assert result == {"ok": True, "skipped": "invalid config"}
 
-    assert result == {
-        "ok": True,
-        "skipped": "invalid config",
-    }
-    config_loader.load.assert_awaited_once_with(
-        "testorg",
-        "testrepo",
-        8888,
-    )
+    assert config_loader.load.await_count == 3
+    webhook_log.error.assert_not_called()

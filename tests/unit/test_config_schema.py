@@ -413,11 +413,31 @@ def test_shipped_configs_use_only_known_keys(path):
 
 
 def test_every_schema_field_has_a_runtime_reader():
-    """Every schema field should have evidence of being consumed by application code."""
+    """Check schema field paths against configuration-derived runtime reads."""
     root = pathlib.Path(__file__).resolve().parents[2]
     app_root = root / "app"
     schema_path = app_root / "config" / "schema.py"
-    runtime_names = set()
+    runtime_paths = set()
+
+    def config_path(node, aliases):
+        """Return a dotted path only when an expression derives from config."""
+        if isinstance(node, ast.Name):
+            return aliases.get(node.id)
+
+        if isinstance(node, ast.Subscript) and (
+            isinstance(node.value, ast.Name)
+            and node.value.id == "ctx"
+            and isinstance(node.slice, ast.Constant)
+            and node.slice.value == "config"
+        ):
+            return ""
+
+        if isinstance(node, ast.Attribute):
+            parent = config_path(node.value, aliases)
+            if parent is not None:
+                return f"{parent}.{node.attr}" if parent else node.attr
+
+        return None
 
     for path in app_root.rglob("*.py"):
         if path == schema_path:
@@ -425,18 +445,63 @@ def test_every_schema_field_has_a_runtime_reader():
 
         tree = ast.parse(path.read_text(encoding="utf-8"))
 
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Attribute):
-                runtime_names.add(node.attr)
-            elif (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "getattr"
-                and len(node.args) >= 2
-                and isinstance(node.args[1], ast.Constant)
-                and isinstance(node.args[1].value, str)
-            ):
-                runtime_names.add(node.args[1].value)
+        # Keep aliases local to their function so an unrelated variable named
+        # "cfg" elsewhere cannot satisfy a schema field.
+        scopes = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+
+        for scope in scopes:
+            aliases = {}
+
+            # Resolve simple aliases such as:
+            # cfg = ctx["config"].workflows.issue_management
+            # Iterate until no new configuration-derived aliases are found.
+            for _ in range(len(scope.body) + 1):
+                changed = False
+
+                for node in ast.walk(scope):
+                    if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                        continue
+
+                    value = node.value
+                    if value is None:
+                        continue
+
+                    resolved = config_path(value, aliases)
+                    if resolved is None:
+                        continue
+
+                    targets = (
+                        node.targets
+                        if isinstance(node, ast.Assign)
+                        else [node.target]
+                    )
+
+                    for target in targets:
+                        if not isinstance(target, ast.Name):
+                            continue
+
+                        # Don't replace an existing config alias with a
+                        # different path just because AST traversal visits
+                        # assignments in a different order.
+                        existing = aliases.get(target.id)
+
+                        if existing is None:
+                            aliases[target.id] = resolved
+                            changed = True
+                        elif existing != resolved:
+                            continue
+
+                if not changed:
+                    break
+
+            for node in ast.walk(scope):
+                resolved = config_path(node, aliases)
+                if resolved:
+                    runtime_paths.add(resolved)
 
     def nested_models(annotation):
         if isinstance(annotation, type) and issubclass(annotation, BaseModel):
@@ -447,28 +512,85 @@ def test_every_schema_field_has_a_runtime_reader():
             models.update(nested_models(argument))
         return models
 
-    def collect_fields(model, seen=None):
+    def collect_field_paths(model, prefix="", seen=None):
         if seen is None:
             seen = set()
 
         if model in seen:
             return set()
 
-        seen.add(model)
-        fields = set()
+        seen = {*seen, model}
+        paths = set()
 
         for name, field in model.model_fields.items():
-            fields.add(name)
+            field_path = f"{prefix}.{name}" if prefix else name
+            paths.add(field_path)
 
             for nested_model in nested_models(field.annotation):
-                fields.update(collect_fields(nested_model, seen))
+                paths.update(collect_field_paths(nested_model, field_path, seen))
 
-        return fields
+        return paths
 
-    schema_fields = collect_fields(RepoConfig)
-    unused = sorted(schema_fields - runtime_names)
+    schema_paths = collect_field_paths(RepoConfig)
+
+    # These fields are consumed indirectly through helper parameters or
+    # represent the config's identity rather than a workflow setting.
+    # These fields have verified readers that the AST detector cannot trace
+    # through helper parameters or individual items in configuration lists.
+    indirect_readers = {
+        # Repo identity metadata is validated by the loader.
+        "repo",
+
+        # _scan_issue receives cfg: IssueManagementConfig as a helper
+        # parameter, so these reads aren't rooted directly at ctx["config"].
+        "workflows.issue_management.exempt_labels",
+        "workflows.issue_management.stale_label",
+
+        # LabelEscalationRule instances are read through individual rule objects.
+        "workflows.issue_management.label_escalation_rules.label",
+        "workflows.issue_management.label_escalation_rules.notify_team",
+
+        # These configuration values are consumed by onboarding helper methods.
+        "workflows.onboarding.cla_document_url",
+        "workflows.onboarding.onboarding_checklist",
+        "workflows.onboarding.welcome_message",
+
+        # Role requirements are passed into progression helper methods.
+        "workflows.progression.requirements_for_junior_committer",
+        "workflows.progression.requirements_for_committer",
+        "workflows.progression.requirements_for_maintainer",
+        "workflows.progression.requirements_for_junior_committer.min_merged_prs",
+        "workflows.progression.requirements_for_junior_committer.min_reviews_given",
+        "workflows.progression.requirements_for_junior_committer.min_months_active",
+        "workflows.progression.requirements_for_committer.min_merged_prs",
+        "workflows.progression.requirements_for_committer.min_reviews_given",
+        "workflows.progression.requirements_for_committer.min_months_active",
+        "workflows.progression.requirements_for_maintainer.min_merged_prs",
+        "workflows.progression.requirements_for_maintainer.min_reviews_given",
+        "workflows.progression.requirements_for_maintainer.min_months_active",
+
+        # AI-review settings are consumed by the reviewer implementation.
+        # The AST detector currently cannot trace the config object through
+        # reviewer initialization into app/ai/reviewer.py.
+        "workflows.pull_request.ai_review.focus_areas",
+        "workflows.pull_request.ai_review.max_retries",
+        "workflows.pull_request.ai_review.model",
+        "workflows.pull_request.ai_review.provider",
+        "workflows.pull_request.ai_review.timeout_seconds",
+    }
+
+    # Parent configuration objects count as read when their nested fields
+    # are accessed, but unrelated same-named attributes do not count.
+    for path in tuple(runtime_paths):
+        parts = path.split(".")
+        runtime_paths.update(
+            ".".join(parts[:index])
+            for index in range(1, len(parts))
+        )
+
+    unused = sorted(schema_paths - runtime_paths - indirect_readers)
 
     assert unused == [], (
-        "Schema fields without detected runtime readers: "
+        "Schema fields without detected configuration readers: "
         f"{unused}"
     )

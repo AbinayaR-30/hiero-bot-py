@@ -141,11 +141,10 @@ class WebhookRouter:
 
         try:
             config = await self._config_loader.load(owner, repo, installation_id)
-        except ConfigInvalid as exc:
-            # A broken config is the repository's problem, not a delivery
-            # failure. Returning 200 stops GitHub retrying the same delivery
-            # for hours against a file that will not parse until a human edits it.
-            log.error("Skipping %s/%s: %s", owner, repo, exc.detail)
+        except ConfigInvalid:
+            # ConfigLoader logs the invalid config when it is first cached.
+            # Avoid repeating an ERROR for every webhook delivery that
+            # encounters the cached invalid configuration.
             return {"ok": True, "skipped": "invalid config"}
 
         if config is None:
