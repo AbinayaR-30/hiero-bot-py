@@ -55,7 +55,9 @@ class PullRequestWorkflow:
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         db = ctx["db"]
         pr_number = pr["number"]
-        author = pr["user"]["login"]
+        author = (pr.get("user") or {}).get("login") or ""
+        if not author:
+            return
 
         checks = await self._run_quality_checks(ctx, pr)
         all_passed = all(c.passed for c in checks)
@@ -401,7 +403,7 @@ class PullRequestWorkflow:
                 owner=owner,
                 repo=repo,
                 target_number=pr_number,
-                target_login=pr["user"]["login"],
+                target_login=(pr.get("user") or {}).get("login") or "",
                 reason="AI review failed",
                 metadata={"summary": result["summary"][:200]},
             )
@@ -462,7 +464,7 @@ class PullRequestWorkflow:
                 owner=owner,
                 repo=repo,
                 target_number=pr_number,
-                target_login=pr["user"]["login"],
+                target_login=(pr.get("user") or {}).get("login") or "",
                 reason=f"AI review score={result['score']}",
                 metadata={"score": result["score"], "verdict": result["verdict"]},
             )
@@ -482,7 +484,9 @@ class PullRequestWorkflow:
         """
         owner, repo, inst = ctx["owner"], ctx["repo"], ctx["installation_id"]
         pr_number = pr["number"]
-        author = pr["user"]["login"]
+        author = (pr.get("user") or {}).get("login") or ""
+        if not author:
+            return
 
         try:
             files = await self._gh.list_pr_files(owner, repo, pr_number, inst)
