@@ -78,15 +78,15 @@ def base_config():
                 "recommendation_count": 3,
                 "requirements_for_junior_committer": {
                     "min_merged_prs": 3, "min_reviews_given": 2,
-                    "min_months_active": 1, "require_endorsement_from": "committer"
+                    "min_months_active": 1
                 },
                 "requirements_for_committer": {
                     "min_merged_prs": 15, "min_reviews_given": 10,
-                    "min_months_active": 6, "require_endorsement_from": "maintainer"
+                    "min_months_active": 6
                 },
                 "requirements_for_maintainer": {
                     "min_merged_prs": 50, "min_reviews_given": 30,
-                    "min_months_active": 12, "require_endorsement_from": "maintainer"
+                    "min_months_active": 12
                 },
                 "celebrate_milestones": True,
             },

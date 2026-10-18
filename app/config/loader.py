@@ -152,19 +152,20 @@ class ConfigLoader:
             return False, None
         self._hits += 1
         self._cache.move_to_end(key)
+
+        if entry.invalid_detail is not None:
+            raise ConfigInvalid(key, entry.invalid_detail)
+
         return True, entry.config
 
-        if entry is not None and entry.fresh:
-            self._hits += 1
-            self._cache.move_to_end(key)
-
-            if entry.invalid_detail is not None:
-                raise ConfigInvalid(key, entry.invalid_detail)
-
-            return entry.config
-
-        self._misses += 1
-
+    async def _fetch(
+        self,
+        owner: str,
+        repo: str,
+        installation_id: int,
+        key: str,
+        generation: int,
+    ) -> RepoConfig | None:
         try:
             raw_b64 = await self._client.get_file_content(
                 owner,
@@ -191,13 +192,17 @@ class ConfigLoader:
         try:
             config = self._parse(key, raw_b64)
         except ConfigInvalid as exc:
-            # Cache invalid configs to avoid repeated GitHub API requests.
-            self._store(key, None, invalid_detail=exc.detail)
+            # Cache invalid configs briefly and log only when the current
+            # generation accepts the cached failure.
+            stored = self._store_if_current(
+                key, None, generation, invalid_detail=exc.detail
+            )
+            if stored:
+                log.error("Invalid config for %s: %s", key, exc.detail)
             raise
 
-        self._store(key, config)
-
-        log.info("Loaded config for %s", key)
+        if self._store_if_current(key, config, generation):
+            log.info("Loaded config for %s", key)
 
         return config
 
@@ -252,12 +257,6 @@ class ConfigLoader:
                 for error in exc.errors()[:5]
             )
 
-            log.error(
-                "Invalid config for %s: %s",
-                slug,
-                detail,
-            )
-
             raise ConfigInvalid(slug, detail) from exc
 
         # Unknown keys are intentionally non-fatal so existing configs remain
@@ -282,12 +281,8 @@ class ConfigLoader:
         config: RepoConfig | None,
         invalid_detail: str | None = None,
     ) -> None:
-        # Invalid configs use the normal TTL; missing configs use the shorter TTL.
-        ttl = (
-            _CACHE_TTL
-            if config is not None or invalid_detail is not None
-            else _NEGATIVE_CACHE_TTL
-        )
+        # Missing and invalid configs use the shorter TTL for prompt retries.
+        ttl = _CACHE_TTL if config is not None else _NEGATIVE_CACHE_TTL
 
         self._cache[key] = _CacheEntry(
             config=config,
@@ -302,13 +297,17 @@ class ConfigLoader:
             log.debug("Evicted config cache entry for %s", evicted)
 
     def _store_if_current(
-        self, key: str, config: RepoConfig | None, generation: int
+        self,
+        key: str,
+        config: RepoConfig | None,
+        generation: int,
+        invalid_detail: str | None = None,
     ) -> bool:
         """Store only when this fetch still belongs to the current generation."""
         if self._generation.get(key, 0) != generation:
             log.debug("Dropping stale config fetch for %s", key)
             return False
-        self._store(key, config)
+        self._store(key, config, invalid_detail=invalid_detail)
         return True
 
     def _bump(self, key: str) -> None:
@@ -359,4 +358,5 @@ class ConfigLoader:
             ),
             "hits": self._hits,
             "misses": self._misses,
+            "coalesced": self._coalesced,
         }

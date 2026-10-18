@@ -2,9 +2,10 @@
 
 import ast
 import pathlib
+from typing import get_args
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from app.config.schema import RepoConfig, find_unknown_keys
 
@@ -412,14 +413,10 @@ def test_shipped_configs_use_only_known_keys(path):
 
 
 def test_every_schema_field_has_a_runtime_reader():
-    """
-    Every configuration schema field must have evidence of being consumed
-    outside the schema definition itself.
-    """
+    """Every schema field should have evidence of being consumed by application code."""
     root = pathlib.Path(__file__).resolve().parents[2]
     app_root = root / "app"
     schema_path = app_root / "config" / "schema.py"
-
     runtime_names = set()
 
     for path in app_root.rglob("*.py"):
@@ -431,23 +428,40 @@ def test_every_schema_field_has_a_runtime_reader():
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute):
                 runtime_names.add(node.attr)
-            elif isinstance(node, ast.keyword):
-                if node.arg is not None:
-                    runtime_names.add(node.arg)
-            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-                runtime_names.add(node.value)
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "getattr"
+                and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and isinstance(node.args[1].value, str)
+            ):
+                runtime_names.add(node.args[1].value)
 
-    def collect_fields(model):
+    def nested_models(annotation):
+        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+            return {annotation}
+
+        models = set()
+        for argument in get_args(annotation):
+            models.update(nested_models(argument))
+        return models
+
+    def collect_fields(model, seen=None):
+        if seen is None:
+            seen = set()
+
+        if model in seen:
+            return set()
+
+        seen.add(model)
         fields = set()
 
         for name, field in model.model_fields.items():
             fields.add(name)
 
-            annotation = field.annotation
-            if isinstance(annotation, type) and hasattr(
-                annotation, "model_fields"
-            ):
-                fields.update(collect_fields(annotation))
+            for nested_model in nested_models(field.annotation):
+                fields.update(collect_fields(nested_model, seen))
 
         return fields
 
@@ -455,6 +469,6 @@ def test_every_schema_field_has_a_runtime_reader():
     unused = sorted(schema_fields - runtime_names)
 
     assert unused == [], (
-        "Schema fields without runtime readers: "
+        "Schema fields without detected runtime readers: "
         f"{unused}"
     )
