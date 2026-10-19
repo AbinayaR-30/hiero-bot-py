@@ -1,8 +1,9 @@
+
 # .github/hiero-bot.yml  ─────────────────────────────────────────
 # Hiero Maintainer Bot v2 — Repository Configuration
 # Add this file to any repo where the bot is installed.
 # Every workflow section is optional; omit what you don't need.
-# 
+#
 
 repo: "hiero/your-repo"
 
@@ -14,7 +15,7 @@ teams:
 
 workflows:
 
-  #  Onboarding 
+  # Onboarding
   onboarding:
     enabled: true
 
@@ -33,8 +34,9 @@ workflows:
     cla_signatures_file: ".github/cla-signatures.json"
     # cla_document_url: "https://example.org/cla"
 
-    minimum_account_age_days: 0       # 0 = no minimum
-    minimum_public_contributions: 0   # 0 = no minimum
+    minimum_account_age_days: 0        # 0 = no minimum
+    minimum_public_contributions: 0    # 0 = no minimum
+
     # Maximum number of open issues a contributor can have assigned
     # simultaneously in this repository.
     # Set to null to disable the limit.
@@ -48,10 +50,10 @@ workflows:
       - Sign your commits (DCO)
       - Join the Hiero Discord
 
-  #  Pull Request
+  # Pull Request
   pull_request:
     enabled: false
-    reviewer_recommendation: true     # Suggest reviewers based on file history
+    reviewer_recommendation: true  # Suggest reviewers based on file history
 
     ai_review:
       enabled: false
@@ -67,7 +69,7 @@ workflows:
       max_comments: 5                 # 1–20
       focus_areas: [security, logic]  # security | performance | style | logic | tests
       max_retries: 2                  # transient failures only; 0–5
-      timeout_seconds: 60             # maximum time allowed per request
+      timeout_seconds: 60            # maximum time allowed per request
 
     quality_gates:
       require_tests: true
@@ -80,7 +82,7 @@ workflows:
 
     auto_label: true
 
-  #  Reviewer Assignment
+  # Reviewer Assignment
   #
   # Automatically requests reviewers on newly opened, non-draft PRs.
   # Unlike pull_request.reviewer_recommendation, this makes a real
@@ -121,9 +123,10 @@ workflows:
     #
     # See .github/reviewers.yml in this repository for a working example.
 
-  #  PR Health Scoring
+  # PR Health Scoring
   pr_health:
     enabled: true
+
     # Relative weights: signals you leave out count for nothing, and the rest
     # are scaled so that they add up to 1 (a perfect PR always scores 100).
     score_weights:
@@ -136,12 +139,12 @@ workflows:
     comment_threshold: 60    # Post comment only if score < this
     label_healthy_above: 75  # Apply "healthy" label if score >= this
 
-  #  Developer Progression
+  # Developer Progression
   progression:
     enabled: true
     recommend_issues_after_merge: true
     recommendation_count: 3
-    celebrate_milestones: true   # Celebrate 1st, 5th, 10th, 25th, 50th PRs
+    celebrate_milestones: true  # Celebrate 1st, 5th, 10th, 25th, 50th PRs
 
     requirements_for_junior_committer:
       min_merged_prs: 3
@@ -158,11 +161,11 @@ workflows:
       min_reviews_given: 30
       min_months_active: 12
 
-  # Issue Management 
+  # Issue Management
   issue_management:
-    enabled: true    # off by default: this workflow closes issues and unassigns people
-    stale_issue_days: 60         # days without activity before an issue is marked stale
-    close_stale_after_days: 7    # grace period: days after an issue is marked stale (with no further activity) before it is closed
+    enabled: true              # off by default: this workflow closes issues and unassigns people
+    stale_issue_days: 60       # days without activity before an issue is marked stale
+    close_stale_after_days: 7  # grace period: days after an issue is marked stale (with no further activity) before it is closed
     stale_label: "stale"
     exempt_labels:
       - pinned
