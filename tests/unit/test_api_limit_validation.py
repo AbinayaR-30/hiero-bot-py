@@ -1,4 +1,6 @@
+
 import pytest
+
 
 @pytest.mark.parametrize(
     "endpoint",
@@ -14,4 +16,5 @@ def test_list_endpoints_reject_non_positive_limits(
     client, endpoint, limit
 ):
     response = client.get(endpoint, params={"limit": limit})
+
     assert response.status_code == 422
