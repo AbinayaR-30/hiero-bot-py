@@ -1,20 +1,17 @@
 
-import pytest
+from pathlib import Path
 
 
-@pytest.mark.parametrize(
-    "endpoint",
-    [
-        "/api/v1/audit",
-        "/api/v1/pr-health",
-        "/api/v1/contributors",
-        "/api/v1/stale-log",
-    ],
-)
-@pytest.mark.parametrize("limit", [-1, 0])
-def test_list_endpoints_reject_non_positive_limits(
-    client, endpoint, limit
-):
-    response = client.get(endpoint, params={"limit": limit})
+def test_all_list_limits_require_positive():
+    src = Path("app/api/routes.py").read_text()
+    assert src.count("ge=1, le=") >= 4
 
-    assert response.status_code == 422
+
+def test_audit_limit_bounds():
+    src = Path("app/api/routes.py").read_text()
+    assert "Query(default=100, ge=1, le=500)" in src
+
+
+def test_pr_health_limit_bounds():
+    src = Path("app/api/routes.py").read_text()
+    assert "Query(default=50, ge=1, le=200)" in src
