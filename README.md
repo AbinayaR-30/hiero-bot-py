@@ -10,7 +10,7 @@
 
   [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://python.org)
   [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-  [![CI](https://github.com/AnthropicBots/hiero-bot-py/actions/workflows/ci.yml/badge.svg)](https://github.com/AnthropicBots/hiero-bot-py/actions/workflows/ci.yml)
+  [![CI](https://github.com/AnthropicBots/Hiero Bot/actions/workflows/ci.yml/badge.svg)](https://github.com/AnthropicBots/Hiero Bot/actions/workflows/ci.yml)
   [![FastAPI](https://img.shields.io/badge/framework-FastAPI-009688)](https://fastapi.tiangolo.com/)
   [![GitHub Marketplace](https://img.shields.io/badge/GitHub-Marketplace-24292e?logo=github)](https://github.com/marketplace/hydra-maintainer)
 
@@ -138,8 +138,8 @@ Base path: `/api/v1`
 
 ```bash
 # 1. Clone and install
-git clone https://github.com/mohityadav8/hiero-bot-py
-cd hiero-bot-py
+git clone https://github.com/mohityadav8/Hiero Bot
+cd Hiero Bot
 pip install -r requirements.txt
 
 # 2. Configure
